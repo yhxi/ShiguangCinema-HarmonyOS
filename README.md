@@ -7,11 +7,11 @@
 
 ## 安装包
 
-仓库根目录的 `ShiguangCinema-HarmonyOS-v1.1.1-unsigned.hap` 是**未签名**构建，
+仓库根目录的 `ShiguangCinema-HarmonyOS-v1.1.2-unsigned.hap` 是**未签名**构建，
 需要自行签名后才能装到设备上（见下方「签名」）。
 
 - bundleName：`com.lshai.shiguangcinema`
-- versionName：`1.1.1` / versionCode：`10101`
+- versionName：`1.1.2` / versionCode：`10102`
 - deviceTypes：`phone`
 
 ## 功能

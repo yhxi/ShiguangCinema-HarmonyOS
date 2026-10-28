@@ -260,42 +260,56 @@ export class Prefs {
     await this.putMap(KEY_SOURCES, map);
   }
 
-  async getHistory(): Promise<WatchEntry[]> {
+  private historyCache: WatchEntry[] | null = null;
+
+  /** 从磁盘解析历史并写入缓存；调用方不要改动返回的数组 */
+  private async loadHistoryFromDisk(): Promise<WatchEntry[]> {
     const raw = s((this.store as preferences.Preferences).getSync(KEY_HISTORY, ''));
-    if (raw === '') {
-      return [];
-    }
-    const root = parseObj(raw);
     const out: WatchEntry[] = [];
-    const arr = asArr(root['list'] as Object);
-    if (arr === null) {
-      return out;
-    }
-    for (const item of arr) {
-      const o = asObj(item);
-      if (o === null) {
-        continue;
+    if (raw !== '') {
+      const root = parseObj(raw);
+      const arr = asArr(root['list'] as Object);
+      if (arr !== null) {
+        for (const item of arr) {
+          const o = asObj(item);
+          if (o === null) {
+            continue;
+          }
+          out.push({
+            key: s(o['key']),
+            serverUrl: s(o['serverUrl']),
+            sourceUrl: s(o['sourceUrl']),
+            vodId: s(o['vodId']),
+            title: s(o['title']),
+            cover: s(o['cover']),
+            episodeIndex: n(o['episodeIndex']),
+            episodeCount: n(o['episodeCount']),
+            positionMs: n(o['positionMs']),
+            durationMs: n(o['durationMs']),
+            updatedAt: n(o['updatedAt'])
+          });
+        }
       }
-      out.push({
-        key: s(o['key']),
-        serverUrl: s(o['serverUrl']),
-        sourceUrl: s(o['sourceUrl']),
-        vodId: s(o['vodId']),
-        title: s(o['title']),
-        cover: s(o['cover']),
-        episodeIndex: n(o['episodeIndex']),
-        episodeCount: n(o['episodeCount']),
-        positionMs: n(o['positionMs']),
-        durationMs: n(o['durationMs']),
-        updatedAt: n(o['updatedAt'])
-      });
     }
     out.sort((a: WatchEntry, c: WatchEntry) => c.updatedAt - a.updatedAt);
+    this.historyCache = out;
     return out;
   }
 
+  async getHistory(): Promise<WatchEntry[]> {
+    // 播放中每 5 秒就会保存一次进度，历史必须常驻内存，
+    // 否则每次保存都要全量解析 + 全量序列化 100 条
+    if (this.historyCache === null) {
+      await this.loadHistoryFromDisk();
+    }
+    return (this.historyCache as WatchEntry[]).slice();
+  }
+
   async saveWatch(entry: WatchEntry): Promise<void> {
-    const list = await this.getHistory();
+    if (this.historyCache === null) {
+      await this.loadHistoryFromDisk();
+    }
+    const list = this.historyCache as WatchEntry[];
     const idx = list.findIndex((e: WatchEntry) => e.key === entry.key);
     if (idx >= 0) {
       list.splice(idx, 1);
@@ -321,14 +335,18 @@ export class Prefs {
   }
 
   async clearHistory(): Promise<void> {
+    this.historyCache = [];
     await (this.store as preferences.Preferences).put(KEY_HISTORY, '');
     await (this.store as preferences.Preferences).flush();
   }
 
   async removeWatch(key: string): Promise<void> {
-    const list = await this.getHistory();
-    const filtered = list.filter((e: WatchEntry) => e.key !== key);
-    await this.putEntryList(KEY_HISTORY, filtered);
+    if (this.historyCache === null) {
+      await this.loadHistoryFromDisk();
+    }
+    const list = (this.historyCache as WatchEntry[]).filter((e: WatchEntry) => e.key !== key);
+    this.historyCache = list;
+    await this.putEntryList(KEY_HISTORY, list);
   }
 
   // ---------- 追剧 / 收藏 ----------

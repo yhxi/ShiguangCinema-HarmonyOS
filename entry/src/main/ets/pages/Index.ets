@@ -94,22 +94,23 @@ struct Index {
         const initAttempt = this.connectionAttempt;
         this.prefs = p;
         this.loadUpdateState();
-        const stored = await p.getServerUrl();
+        // 服务端地址和"连接过列表"互不依赖，并行读省一点启动时间
+        const pair = await Promise.all([p.getServerUrl(), p.getServers()]);
+        const stored = pair[0];
+        this.knownServers = pair[1];
         const saved = stored !== '' ? stored : DEFAULT_SERVER_URL;
         if (this.disposed || initAttempt !== this.connectionAttempt) { return; }
         if (saved !== '') {
           this.urlText = saved;
           this.session.restoreCached(saved, '', []);
           this.refreshHome(false);
-          const cookie = await p.getCookie(saved);
-          const sources = await p.getSources(saved);
+          const cached = await Promise.all([p.getCookie(saved), p.getSources(saved)]);
           if (this.disposed || initAttempt !== this.connectionAttempt || this.urlText !== saved) { return; }
-          this.session.restoreCached(saved, cookie, sources);
+          this.session.restoreCached(saved, cached[0], cached[1]);
           this.tryConnect(true);
         } else {
           this.connected = false;
         }
-        this.knownServers = await p.getServers();
       }).catch((e: Object) => {
         this.connected = false;
         this.errorMsg = `初始化失败：${(e as Error).message}`;
