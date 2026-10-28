@@ -23,6 +23,13 @@ import { SourceConfig } from '../api/Models';
 interface PlayerMenuAction { label: string; action: () => void; }
 interface PlayerTrack { index: number; type: number; label: string; }
 
+/** 字节/秒 → 人类可读 */
+function formatNetSpeed(bytesPerSec: number): string {
+  if (bytesPerSec >= 1024 * 1024) { return `${(bytesPerSec / 1024 / 1024).toFixed(1)} MB/s`; }
+  if (bytesPerSec >= 1024) { return `${Math.round(bytesPerSec / 1024)} KB/s`; }
+  return `${Math.round(bytesPerSec)} B/s`;
+}
+
 @Entry
 @Component
 struct Player {
@@ -42,6 +49,9 @@ struct Player {
   @State cropVideo: boolean = false;
   @State backgroundPlayback: boolean = false;
   @State loadMessage: string = '正在创建播放窗口…';
+  @State buffering: boolean = false;
+  @State isPaused: boolean = false;
+  @State netSpeed: string = '';
   @State videoWidth: number = 16;
   @State videoHeight: number = 9;
   @State frameWidth: number = 0;
@@ -91,6 +101,12 @@ struct Player {
   private userDragging: boolean = false;
   private usePlainUrl: boolean = true;
   private alternateTried: boolean = false;
+  /** 网速估算：CACHED_DURATION 的增长速率 × 当前码率 */
+  private cachedMs: number = -1;
+  private lastCachedMs: number = -1;
+  private lastCachedAt: number = 0;
+  private activeBitrate: number = 0;
+  private speedTimer: number = -1;
   /** 自愈：同源已重试过一次 / 已尝试过自动换源 */
   private sameUrlRetried: boolean = false;
   private sourceSwitchTried: boolean = false;
@@ -213,6 +229,7 @@ struct Player {
     this.saveProgress(true);
     this.stopSaveTimer();
     this.stopStartupTimer();
+    this.stopSpeedTimer();
     if (this.hudTimer >= 0) { clearTimeout(this.hudTimer); }
     if (this.sleepTimer >= 0) { clearTimeout(this.sleepTimer); }
     if (this.subtitleTimer >= 0) { clearTimeout(this.subtitleTimer); }
@@ -293,6 +310,11 @@ struct Player {
     this.playing = false;
     this.firstFrameSeen = false;
     this.introApplied = false;
+    this.buffering = false;
+    this.isPaused = false;
+    this.netSpeed = '';
+    this.stopSpeedTimer();
+    this.cachedMs = -1;
     this.availableBitrates = [];
     this.mediaTracks = [];
     this.subtitleText = '';
@@ -373,6 +395,10 @@ struct Player {
         });
       } else if (state === 'playing') {
         this.playing = true;
+        this.isPaused = false;
+        this.buffering = false;
+        this.stopSpeedTimer();
+        this.netSpeed = '';
         this.switching = false;
         if (!this.isLive && this.resumeMs > 0) {
           const resume = this.resumeMs;
@@ -396,6 +422,7 @@ struct Player {
         this.stopBackgroundTask();
       } else if (state === 'paused') {
         this.playing = false;
+        this.isPaused = true;
         this.updateBackgroundSession(false);
         this.stopBackgroundTask();
         this.stopSaveTimer();
@@ -460,10 +487,32 @@ struct Player {
         }
       }
     });
+    p.on('bufferingUpdate', (infoType: media.BufferingInfoType, value: number) => {
+      if (this.disposed || generation !== this.playerGeneration) { return; }
+      if (infoType === media.BufferingInfoType.BUFFERING_START) {
+        this.buffering = true;
+        this.startSpeedTimer();
+      } else if (infoType === media.BufferingInfoType.BUFFERING_END) {
+        this.buffering = false;
+        this.netSpeed = '';
+        this.stopSpeedTimer();
+      } else if (infoType === media.BufferingInfoType.CACHED_DURATION) {
+        // value = 缓冲区里可播放的时长（ms），增长速率 × 码率 ≈ 下载速度
+        this.cachedMs = value;
+      }
+    });
+    p.on('bitrateDone', (bitrate: number) => {
+      if (this.disposed) { return; }
+      // HLS 自适应码率切换完成时回调当前码率（bps）
+      this.activeBitrate = bitrate;
+    });
     p.on('error', (err: BusinessError) => {
       if (this.disposed || generation !== this.playerGeneration) { return; }
       this.switching = false;
       this.playing = false;
+      this.buffering = false;
+      this.isPaused = false;
+      this.stopSpeedTimer();
       this.showControls = true;
       if (this.handlePlaybackFailure(err.code, generation)) { return; }
       this.loadMessage = '';
@@ -587,6 +636,34 @@ struct Player {
 
   private stopStartupTimer(): void {
     if (this.startupTimer >= 0) { clearTimeout(this.startupTimer); this.startupTimer = -1; }
+  }
+
+  /** 缓冲时每秒采样一次缓冲时长的增量，换算成实时网速 */
+  private startSpeedTimer(): void {
+    if (this.speedTimer >= 0) { return; }
+    this.lastCachedMs = this.cachedMs;
+    this.lastCachedAt = Date.now();
+    this.speedTimer = setInterval(() => { this.updateNetSpeed(); }, 1000);
+  }
+
+  private stopSpeedTimer(): void {
+    if (this.speedTimer >= 0) { clearInterval(this.speedTimer); this.speedTimer = -1; }
+    this.lastCachedMs = -1;
+  }
+
+  private updateNetSpeed(): void {
+    const now = Date.now();
+    if (this.cachedMs >= 0 && this.lastCachedMs >= 0 && now > this.lastCachedAt && this.activeBitrate > 0) {
+      const dtSec = (now - this.lastCachedAt) / 1000;
+      const deltaMs = this.cachedMs - this.lastCachedMs;
+      if (deltaMs > 0) {
+        // 缓冲时长每秒增长 deltaMs 秒的片源内容，乘上码率即每秒字节数
+        const bytesPerSec = (deltaMs / 1000) * (this.activeBitrate / 8);
+        this.netSpeed = formatNetSpeed(bytesPerSec);
+      }
+    }
+    this.lastCachedMs = this.cachedMs;
+    this.lastCachedAt = now;
   }
 
   private startStartupTimer(generation: number): void {
@@ -913,14 +990,20 @@ struct Player {
       const descriptions = await player.getTrackDescription();
       if (this.disposed || generation !== this.playerGeneration) { return; }
       const tracks: PlayerTrack[] = [];
+      let bitrateTotal = 0;
+      let bitrateSeen = false;
       for (const description of descriptions) {
         const index = description['track_index']; const type = description['track_type'];
         if (typeof index !== 'number' || typeof type !== 'number' || (type !== 0 && type !== 2)) { continue; }
         const language = description['language']; const name = description['track_name'];
         const label = typeof name === 'string' ? name : typeof language === 'string' ? language : `轨道 ${index + 1}`;
         tracks.push({ index: index, type: type, label: `${type === 0 ? '音轨' : '字幕'} · ${label}` });
+        const bit = description['bitrate'];
+        if (typeof bit === 'number' && bit > 0) { bitrateTotal += bit; bitrateSeen = true; }
       }
       this.mediaTracks = tracks;
+      // 非自适应流（mp4 直链）从这里拿码率，用于估算网速；HLS 用 bitrateDone 事件
+      if (bitrateSeen) { this.activeBitrate = bitrateTotal; }
     } catch (e) { this.mediaTracks = []; }
   }
 
@@ -1138,6 +1221,28 @@ struct Player {
           Text(this.loadMessage).fontSize(14).fontColor('#FFFFFF')
         }.padding(18).backgroundColor('#CC16161C').borderRadius(10)
       }
+      if (this.loadMessage === '' && this.errorMsg === '') {
+        if (this.buffering) {
+          // 卡顿 / 缓冲：居中提示 + 实时网速
+          Column({ space: 8 }) {
+            LoadingProgress().width(30).height(30).color('#FFFFFF')
+            Text('缓冲中').fontSize(14).fontColor('#FFFFFF')
+            if (this.netSpeed !== '') {
+              Text(this.netSpeed).fontSize(12).fontColor('#B9CBC5')
+            }
+          }.padding(16).backgroundColor('#CC16161C').borderRadius(10)
+            .hitTestBehavior(HitTestMode.None)
+        } else if (this.isPaused) {
+          // 用户暂停：居中提示，点一下继续
+          Column({ space: 6 }) {
+            Text('已暂停').fontSize(14).fontColor('#FFFFFF')
+            if (this.netSpeed !== '') {
+              Text(this.netSpeed).fontSize(12).fontColor('#B9CBC5')
+            }
+          }.padding(16).backgroundColor('#CC16161C').borderRadius(10)
+            .onClick(() => { this.togglePlay(); })
+        }
+      }
       if (this.errorMsg !== '') {
         Text(this.errorMsg).fontSize(14).fontColor('#FF6B6B')
           .padding(12).backgroundColor('#CC16161C').borderRadius(8)
@@ -1177,8 +1282,8 @@ struct Player {
             })
         }.width('100%').padding({ left: 12 }).hitTestBehavior(HitTestMode.Transparent)
       }
-      if (!this.playing && this.loadMessage === '' && this.errorMsg === '' && !this.locked &&
-        this.activeMenu === '' && !this.showEpisodes) {
+      if (!this.playing && this.loadMessage === '' && this.errorMsg === '' && !this.buffering &&
+        !this.isPaused && !this.locked && this.activeMenu === '' && !this.showEpisodes) {
         Text('▶').fontSize(34).fontColor('#FFFFFF').width(70).height(70).textAlign(TextAlign.Center)
           .borderRadius(35).backgroundColor('#66000000').onClick(() => { this.togglePlay(); })
       }
