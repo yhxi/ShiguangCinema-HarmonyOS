@@ -1,0 +1,22 @@
+# 构建产物
+entry/build/
+build/
+.hvigor/
+oh_modules/
+node_modules/
+dist/
+
+# 签名材料：证书、密钥库、profile 绝不入库
+sign/
+*.p12
+*.cer
+*.p7b
+*.csr
+
+# 本地工具与日志
+.workbuddy/
+.workbuddy-ai/
+.playwright-cli/
+*.log
+.DS_Store
+Thumbs.db

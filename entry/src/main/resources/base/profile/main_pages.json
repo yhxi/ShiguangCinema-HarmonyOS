@@ -1,0 +1,16 @@
+{
+  "src": [
+    "pages/Index",
+    "pages/Search",
+    "pages/Detail",
+    "pages/Player",
+    "pages/History",
+    "pages/Live",
+    "pages/SourceManage",
+    "pages/Scan",
+    "pages/Favorites",
+    "pages/NetDiag",
+    "pages/PlaybackSettings",
+    "pages/Settings"
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "string": [
+    { "name": "app_name", "value": "时光影院" },
+    { "name": "module_desc", "value": "时光影院主模块" },
+    { "name": "ability_desc", "value": "时光影院入口" },
+    { "name": "internet_reason", "value": "连接影视服务端与播放视频所需网络权限" },
+    { "name": "camera_reason", "value": "扫码导入服务端地址与片源订阅" },
+    { "name": "background_playback_reason", "value": "按设置允许正在播放的视频在应用切到后台后继续播放" }
+  ]
+}
