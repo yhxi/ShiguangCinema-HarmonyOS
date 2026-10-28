@@ -4,6 +4,7 @@ import { clearPosterCache } from '../components/PosterImage';
 import { Session } from '../store/Session';
 import { Prefs, UpdateState } from '../store/Prefs';
 import { checkUpdate, isNewerVersion, releasesPageUrl, ReleaseInfo } from '../api/UpdateChecker';
+import { UpdateDialog } from '../components/UpdateDialog';
 import { Theme } from '../common/Theme';
 
 interface SettingsItem {
@@ -21,6 +22,10 @@ struct SettingsPage {
   @State connected: boolean = false;
   @State serverName: string = '';
   @State versionLabel: string = '';
+  @State showUpdateDialog: boolean = false;
+  @State newTag: string = '';
+  @State newNotes: string = '';
+  @State newDownloadUrl: string = '';
 
   private session: Session = Session.getInstance();
   private settingsWindow: window.Window | null = null;
@@ -108,8 +113,11 @@ struct SettingsPage {
       promptAction.showToast({ message: `已是最新版本 v${this.versionLabel}` });
       return;
     }
-    promptAction.showToast({ message: `发现新版本 ${rel.tag}，正在打开发布页` });
-    this.openReleasePage(rel.releaseUrl !== '' ? rel.releaseUrl : releasesPageUrl());
+    // 应用内下载：交给更新弹窗走进度条，完成后可交给其他应用签名 / 安装
+    this.newTag = rel.tag;
+    this.newNotes = rel.notes;
+    this.newDownloadUrl = rel.downloadUrl;
+    this.showUpdateDialog = true;
   }
 
   /** HAP 不能由应用自行安装，打开 GitHub 发布页让用户下载 */
@@ -146,6 +154,7 @@ struct SettingsPage {
   }
 
   build() {
+    Stack() {
     Scroll() {
       Column({ space: 12 }) {
         Row() {
@@ -201,5 +210,16 @@ struct SettingsPage {
           .textAlign(TextAlign.Center).padding({ top: 22, bottom: 14 })
       }.width('100%').padding({ left: 18, right: 18, bottom: 18 }).alignItems(HorizontalAlign.Start)
     }.width('100%').height('100%').backgroundColor(Theme.BG).scrollBar(BarState.Off)
+
+    if (this.showUpdateDialog) {
+      UpdateDialog({
+        newTag: this.newTag,
+        currentVersion: this.versionLabel,
+        notes: this.newNotes,
+        downloadUrl: this.newDownloadUrl,
+        onClosed: () => { this.showUpdateDialog = false; }
+      })
+    }
+    }
   }
 }

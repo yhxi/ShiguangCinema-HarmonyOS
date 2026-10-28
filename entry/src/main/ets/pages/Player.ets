@@ -18,6 +18,7 @@ import { wantAgent } from '@kit.AbilityKit';
 import { fitVideoFrame } from './VideoLayout';
 import { Prefs, PlaybackSettings, SkipMarks, WatchEntry, entryFromStatus } from '../store/Prefs';
 import { Session } from '../store/Session';
+import { SourceConfig } from '../api/Models';
 
 interface PlayerMenuAction { label: string; action: () => void; }
 interface PlayerTrack { index: number; type: number; label: string; }
@@ -90,6 +91,11 @@ struct Player {
   private userDragging: boolean = false;
   private usePlainUrl: boolean = true;
   private alternateTried: boolean = false;
+  /** 自愈：同源已重试过一次 / 已尝试过自动换源 */
+  private sameUrlRetried: boolean = false;
+  private sourceSwitchTried: boolean = false;
+  /** 换源时已尝试过、不再回头的片源地址 */
+  private triedSourceUrls: Set<string> = new Set();
   private startupTimer: number = -1;
   private firstFrameSeen: boolean = false;
   private disposed: boolean = false;
@@ -147,6 +153,8 @@ struct Player {
       this.resumeMs = 0;
     }
     this.isLive = (params['isLive'] ?? '0') === '1';
+    // 当前源记为"已尝试"，换源自愈时从别的源找
+    this.triedSourceUrls = new Set([this.sourceUrl]);
     this.startupTimer = setTimeout(() => {
       if (!this.disposed && !this.surfaceReady) {
         this.loadMessage = '';
@@ -314,7 +322,7 @@ struct Player {
       }
     } catch (e) {
       if (this.disposed || generation !== this.playerGeneration) { return; }
-      if (this.tryAutomaticFallback((e as BusinessError).code, generation)) { return; }
+      if (this.handlePlaybackFailure((e as BusinessError).code, generation)) { return; }
       this.errorMsg = `起播失败：${(e as Error).message}`;
       this.loadMessage = '';
       this.stopStartupTimer();
@@ -338,7 +346,7 @@ struct Player {
         p.surfaceId = this.surfaceId;
         p.prepare().catch((e: Error) => {
           if (this.disposed || generation !== this.playerGeneration) { return; }
-          if (this.tryAutomaticFallback((e as BusinessError).code, generation)) { return; }
+          if (this.handlePlaybackFailure((e as BusinessError).code, generation)) { return; }
           this.switching = false;
           this.loadMessage = '';
           this.stopStartupTimer();
@@ -357,6 +365,7 @@ struct Player {
         this.refreshTracks(p, generation);
         p.play().catch((e: Error) => {
           if (this.disposed || generation !== this.playerGeneration) { return; }
+          if (this.handlePlaybackFailure((e as BusinessError).code, generation)) { return; }
           this.switching = false;
           this.loadMessage = '';
           this.stopStartupTimer();
@@ -407,6 +416,9 @@ struct Player {
     p.on('startRenderFrame', () => {
       if (this.disposed || generation !== this.playerGeneration) { return; }
       this.firstFrameSeen = true;
+      // 起播成功后重置自愈状态：之后的失败可以再走一轮"重试 → 换源"
+      this.sameUrlRetried = false;
+      this.sourceSwitchTried = false;
       this.loadMessage = '';
       this.errorMsg = '';
       this.stopStartupTimer();
@@ -453,7 +465,7 @@ struct Player {
       this.switching = false;
       this.playing = false;
       this.showControls = true;
-      if (this.tryAutomaticFallback(err.code, generation)) { return; }
+      if (this.handlePlaybackFailure(err.code, generation)) { return; }
       this.loadMessage = '';
       this.stopStartupTimer();
       const baseError = `播放失败（${err.code}，状态 ${p.state}）`;
@@ -479,6 +491,100 @@ struct Player {
     return true;
   }
 
+  /**
+   * 播放失败自愈，依次尝试：
+   *   1. 解码 / 格式类错误 → 换播放方式（沿用原有逻辑）
+   *   2. 同源重试一次（分片 404、超时等临时故障）
+   *   3. 自动切换到下一个有这部片的片源
+   * 都失败才把错误抛给用户手动处理。
+   */
+  private handlePlaybackFailure(code: number, generation: number): boolean {
+    if (this.tryAutomaticFallback(code, generation)) { return true; }
+    if (!this.sameUrlRetried) {
+      this.sameUrlRetried = true;
+      this.switching = true;
+      this.errorMsg = '';
+      this.loadMessage = '播放中断，正在重试…';
+      this.stopStartupTimer();
+      const retryGeneration = ++this.playerGeneration;
+      setTimeout(() => {
+        if (!this.disposed && retryGeneration === this.playerGeneration) { this.setupPlayer(); }
+      }, 400);
+      return true;
+    }
+    if (!this.sourceSwitchTried) {
+      this.sourceSwitchTried = true;
+      this.switching = true;
+      this.loadMessage = '当前片源无法播放，正在切换片源…';
+      this.stopStartupTimer();
+      this.switchToNextSource();
+      return true;
+    }
+    return false;
+  }
+
+  /** 换源后重建地址列表；episodeIndex 越界时从头放 */
+  private async switchToNextSource(): Promise<void> {
+    const api = this.session.api;
+    if (api === null || this.title.trim() === '') {
+      this.finishHealFail('没有可用的服务端');
+      return;
+    }
+    const sources = this.session.enabledSources().filter((src) => !this.triedSourceUrls.has(src.url));
+    if (sources.length === 0) {
+      this.finishHealFail('其他片源都已尝试过');
+      return;
+    }
+    try {
+      const result = await api.search(this.title.trim(), sources);
+      for (const item of result.items) {
+        if (item.name !== this.title.trim() || this.triedSourceUrls.has(item.sourceUrl)) { continue; }
+        this.triedSourceUrls.add(item.sourceUrl);
+        const src = this.findSourceByUrl(item.sourceUrl);
+        if (src === null) { continue; }
+        const detail = await api.detail(item.vodId, src);
+        if (detail.episodes.length === 0) { continue; }
+        this.episodes = detail.episodes;
+        this.sourceUrl = item.sourceUrl;
+        this.vodId = item.vodId;
+        if (this.episodeIndex >= this.episodes.length) { this.episodeIndex = 0; }
+        this.cover = detail.info.cover !== '' ? detail.info.cover : this.cover;
+        this.usePlainUrl = true;
+        this.alternateTried = false;
+        this.sameUrlRetried = false;
+        this.sourceSwitchTried = false;
+        this.curMs = 0;
+        this.durMs = 0;
+        this.switching = false;
+        this.gestureMessage = `已切换片源：${item.sourceName}`;
+        if (this.hudTimer >= 0) { clearTimeout(this.hudTimer); }
+        this.hudTimer = setTimeout(() => { this.gestureMessage = ''; }, 2500);
+        this.setupPlayer();
+        return;
+      }
+    } catch (e) {
+      hilog.warn(0, 'ShiguangCinema', 'source switch failed: %{public}s', (e as Error).message);
+    }
+    this.finishHealFail('其他片源也没有可播放的地址');
+  }
+
+  private findSourceByUrl(url: string): SourceConfig | null {
+    for (const src of this.session.sources) {
+      if (src.url === url) { return src; }
+    }
+    return null;
+  }
+
+  /** 自愈全部失败：给出结论和手动换源提示 */
+  private finishHealFail(reason: string): void {
+    this.switching = false;
+    this.sourceSwitchTried = false;
+    this.loadMessage = '';
+    this.stopStartupTimer();
+    this.showControls = true;
+    this.errorMsg = `播放失败：${reason}。可返回后换个片源再试。`;
+  }
+
   private stopStartupTimer(): void {
     if (this.startupTimer >= 0) { clearTimeout(this.startupTimer); this.startupTimer = -1; }
   }
@@ -488,7 +594,7 @@ struct Player {
     this.startupTimer = setTimeout(() => {
       this.startupTimer = -1;
       if (this.disposed || generation !== this.playerGeneration || this.firstFrameSeen) { return; }
-      if (this.tryAutomaticFallback(5400104, generation)) { return; }
+      if (this.handlePlaybackFailure(5400104, generation)) { return; }
       const state = this.player !== null ? this.player.state : 'creating';
       this.switching = false;
       this.loadMessage = '';
@@ -613,6 +719,9 @@ struct Player {
     this.episodeIndex = next;
     this.usePlainUrl = true;
     this.alternateTried = false;
+    this.sameUrlRetried = false;
+    this.sourceSwitchTried = false;
+    this.triedSourceUrls = new Set([this.sourceUrl]);
     this.curMs = 0;
     this.durMs = 0;
     this.setupPlayer();
@@ -624,6 +733,9 @@ struct Player {
     this.episodeIndex = index;
     this.usePlainUrl = true;
     this.alternateTried = false;
+    this.sameUrlRetried = false;
+    this.sourceSwitchTried = false;
+    this.triedSourceUrls = new Set([this.sourceUrl]);
     this.curMs = 0;
     this.durMs = 0;
     this.resumeMs = 0;
@@ -635,6 +747,9 @@ struct Player {
     if (this.switching) { return; }
     this.usePlainUrl = !this.usePlainUrl;
     this.alternateTried = false;
+    this.sameUrlRetried = false;
+    this.sourceSwitchTried = false;
+    this.triedSourceUrls = new Set([this.sourceUrl]);
     this.errorMsg = '';
     this.setupPlayer();
   }

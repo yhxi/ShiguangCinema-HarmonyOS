@@ -15,6 +15,7 @@ import { DEFAULT_SERVER_URL } from '../store/DefaultServer';
 import { checkUpdate, isNewerVersion, releasesPageUrl, ReleaseInfo } from '../api/UpdateChecker';
 import { PosterImage } from '../components/PosterImage';
 import { HomeIcon, iconFillPath } from '../components/HomeIcon';
+import { UpdateDialog } from '../components/UpdateDialog';
 import { Theme } from '../common/Theme';
 
 interface Preset {
@@ -70,6 +71,7 @@ struct Index {
   @State updateTag: string = '';
   @State updateNotes: string = '';
   @State updateReleaseUrl: string = '';
+  @State updateDownloadUrl: string = '';
   @State updateSeen: boolean = true;
   @State showUpdateDialog: boolean = false;
 
@@ -347,6 +349,7 @@ struct Index {
       this.updateTag = state.tag;
       this.updateNotes = state.notes;
       this.updateReleaseUrl = state.releaseUrl;
+      this.updateDownloadUrl = state.downloadUrl;
       this.updateSeen = state.seenTag === state.tag;
     } else {
       this.updateTag = '';
@@ -498,32 +501,16 @@ struct Index {
     }.width('100%').alignItems(VerticalAlign.Center)
   }
 
-  /** 更新说明弹窗：HAP 不能自行安装，按钮直接跳 GitHub 发布页 */
+  /** 更新弹窗：显示新版本说明，应用内下载（带进度），完成后交给其他应用处理 */
   @Builder
   updateDialog() {
-    Column({ space: 12 }) {
-      Text(`新版本 ${this.updateTag}`).fontSize(18).fontWeight(FontWeight.Bold)
-        .fontColor(Theme.INK).width('100%')
-      Text(`当前 v${this.currentVersion}`).fontSize(13).fontColor(Theme.SECONDARY).width('100%')
-      Scroll() {
-        Text(this.updateNotes !== '' ? this.updateNotes : '（这个版本没有提供更新说明）')
-          .fontSize(13).fontColor(Theme.BODY).lineHeight(21).width('100%')
-      }
-      .constraintSize({ maxHeight: 240 }).width('100%').scrollBar(BarState.Off)
-      .padding(12).borderRadius(12).backgroundColor(Theme.BG)
-      Text('HarmonyOS 安装包需要手动安装：点「去下载」打开 GitHub 发布页，下载 HAP 后自行签名安装。')
-        .fontSize(11).fontColor(Theme.TERTIARY).width('100%').lineHeight(17)
-      Row({ space: 10 }) {
-        Button('稍后').fontSize(15).height(44).borderRadius(12).layoutWeight(1)
-          .backgroundColor(Theme.TINT).fontColor(Theme.INK)
-          .onClick(() => { this.showUpdateDialog = false; })
-        Button('去下载').fontSize(15).height(44).borderRadius(12).layoutWeight(1)
-          .backgroundColor(Theme.ACCENT).fontColor(Theme.ON_ACCENT)
-          .onClick(() => { this.showUpdateDialog = false; this.openReleasePage(); })
-      }.width('100%')
-    }
-    .width('86%').padding(20).borderRadius(Theme.RADIUS_CARD).backgroundColor(Theme.PANEL)
-    .border({ width: 1, color: Theme.BORDER })
+    UpdateDialog({
+      newTag: this.updateTag,
+      currentVersion: this.currentVersion,
+      notes: this.updateNotes,
+      downloadUrl: this.updateDownloadUrl,
+      onClosed: () => { this.showUpdateDialog = false; }
+    })
   }
 
   @Builder
