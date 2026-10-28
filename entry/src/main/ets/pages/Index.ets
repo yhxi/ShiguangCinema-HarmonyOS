@@ -4,7 +4,7 @@ import { RouteParams } from './RouteParams';
  * 连接成功后显示主页；未连接显示连接表单。
  */
 
-import { router, window, promptAction } from '@kit.ArkUI';
+import { router, window, promptAction, display } from '@kit.ArkUI';
 import { common, bundleManager } from '@kit.AbilityKit';
 import { Api } from '../api/Api';
 import { DoubanItem } from '../api/Models';
@@ -62,6 +62,10 @@ struct Index {
   /** 当前安装版本，用于和远端 tag 比较 */
   private currentVersion: string = '';
   private updateChecking: boolean = false;
+  /** 入口格子尺寸：按设计稿比例（104×116，间隙 13）随屏宽换算 */
+  private tileHeight: number = 65;
+  private tileIconSize: number = 15;
+  private tileFontSize: number = 13;
 
   @State updateTag: string = '';
   @State updateNotes: string = '';
@@ -71,6 +75,7 @@ struct Index {
 
   aboutToAppear(): void {
     this.disposed = false;
+    this.computeTileMetrics();
     try {
       this.currentVersion = bundleManager.getBundleInfoForSelfSync(
         bundleManager.BundleFlag.GET_BUNDLE_INFO_DEFAULT).versionName;
@@ -280,6 +285,22 @@ struct Index {
     });
   }
 
+  /** 入口格子按设计稿比例换算：5 格 + 4 个 7vp 间隙，左右各 20vp 页边距，宽高比 0.9 */
+  private computeTileMetrics(): void {
+    try {
+      const screenWidth: number = px2vp(display.getDefaultDisplaySync().width);
+      const tileWidth: number = (screenWidth - 40 - 4 * 7) / 5;
+      this.tileHeight = Math.round(tileWidth / 0.9);
+      this.tileIconSize = Math.round(this.tileHeight * 0.23);
+      this.tileFontSize = Math.round(this.tileHeight * 0.20);
+    } catch (e) {
+      // 取不到屏宽就用 360vp 的默认值
+      this.tileHeight = 65;
+      this.tileIconSize = 15;
+      this.tileFontSize = 13;
+    }
+  }
+
   /** 切分类：电影 / 剧集 / 综艺（与 Android 首页入口一致） */
   private setMediaType(type: string): void {
     if (this.recommendType === type) { return; }
@@ -442,11 +463,11 @@ struct Index {
 
   @Builder
   navTile(kind: string, label: string, selected: boolean, action: () => void) {
-    Column({ space: 5 }) {
-      HomeIcon({ kind: kind, iconSize: 18, tint: selected ? Theme.ON_ACCENT : Theme.INK })
-      Text(label).fontSize(15).fontColor(selected ? Theme.ON_ACCENT : Theme.INK).maxLines(1)
+    Column({ space: 6 }) {
+      HomeIcon({ kind: kind, iconSize: this.tileIconSize, tint: selected ? Theme.ON_ACCENT : Theme.INK })
+      Text(label).fontSize(this.tileFontSize).fontColor(selected ? Theme.ON_ACCENT : Theme.INK).maxLines(1)
     }
-    .layoutWeight(1).height(72).justifyContent(FlexAlign.Center)
+    .layoutWeight(1).height(this.tileHeight).justifyContent(FlexAlign.Center)
     .borderRadius(Theme.RADIUS_TILE)
     .backgroundColor(selected ? Theme.TILE_ACTIVE : Theme.PANEL)
     .onClick(action)
@@ -460,7 +481,7 @@ struct Index {
         Column().width(28).height(28).borderRadius(9).backgroundColor('#5E83AD')
         Path()
           .width(28).height(28)
-          .commands(iconFillPath('movie', 28))
+          .commands(iconFillPath('movie', 28 * vp2px(1)))
           .fill(Theme.ON_ACCENT)
           .antiAlias(true)
       }.width(28).height(28)
@@ -569,7 +590,7 @@ struct Index {
         this.brandRow()
 
         // 入口格子：一行五个（点播 / 直播 / 搜索 / 追剧 / 设置），与设计稿一致
-        Row({ space: 15 }) {
+        Row({ space: 7 }) {
           this.navTile('tv', '点播', this.recommendType === 'tv', () => { this.setMediaType('tv'); })
           this.navTile('live', '直播', false, () => { this.goLive(); })
           this.navTile('search', '搜索', false, () => { this.goSearch(); })

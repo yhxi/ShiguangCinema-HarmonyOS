@@ -128,9 +128,11 @@ export struct HomeIcon {
   build() {
     Stack() {
       if (iconStrokePath(this.kind, this.iconSize) !== '') {
+        // Path.commands 用的是 px 坐标系，而宽高是 vp —— 必须乘一次密度，
+        // 否则图标只有 1/密度 大小，还会贴在左上角
         Path()
           .width(this.iconSize).height(this.iconSize)
-          .commands(iconStrokePath(this.kind, this.iconSize))
+          .commands(iconStrokePath(this.kind, this.iconSize * vp2px(1)))
           .fillOpacity(0)
           .stroke(this.tint)
           .strokeWidth(this.iconSize / UNIT * 1.9)
@@ -141,7 +143,7 @@ export struct HomeIcon {
       if (iconFillPath(this.kind, this.iconSize) !== '') {
         Path()
           .width(this.iconSize).height(this.iconSize)
-          .commands(iconFillPath(this.kind, this.iconSize))
+          .commands(iconFillPath(this.kind, this.iconSize * vp2px(1)))
           .fill(this.tint)
           .antiAlias(true)
       }
