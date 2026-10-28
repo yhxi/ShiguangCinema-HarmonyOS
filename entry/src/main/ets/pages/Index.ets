@@ -14,6 +14,7 @@ import { Credentials } from '../store/Credentials';
 import { DEFAULT_SERVER_URL } from '../store/DefaultServer';
 import { checkUpdate, isNewerVersion, releasesPageUrl, ReleaseInfo } from '../api/UpdateChecker';
 import { PosterImage } from '../components/PosterImage';
+import { HomeIcon, iconFillPath } from '../components/HomeIcon';
 import { Theme } from '../common/Theme';
 
 interface Preset {
@@ -440,24 +441,29 @@ struct Index {
   }
 
   @Builder
-  navTile(icon: string, label: string, selected: boolean, action: () => void) {
-    Column({ space: 4 }) {
-      Text(icon).fontSize(25).fontWeight(FontWeight.Medium)
-        .fontColor(selected ? Theme.ON_ACCENT : Theme.INK)
-      Text(label).fontSize(12).fontColor(selected ? Theme.ON_ACCENT : Theme.INK).maxLines(1)
+  navTile(kind: string, label: string, selected: boolean, action: () => void) {
+    Column({ space: 5 }) {
+      HomeIcon({ kind: kind, iconSize: 18, tint: selected ? Theme.ON_ACCENT : Theme.INK })
+      Text(label).fontSize(15).fontColor(selected ? Theme.ON_ACCENT : Theme.INK).maxLines(1)
     }
-    .layoutWeight(1).height(76).justifyContent(FlexAlign.Center)
-    .borderRadius(Theme.RADIUS_TILE).backgroundColor(selected ? Theme.ACCENT : Theme.PANEL)
+    .layoutWeight(1).height(72).justifyContent(FlexAlign.Center)
+    .borderRadius(Theme.RADIUS_TILE)
+    .backgroundColor(selected ? Theme.TILE_ACTIVE : Theme.PANEL)
     .onClick(action)
   }
 
-  /** 顶部品牌字标：与 Android brandRow 一致（▶ 方块 + 文字，不用图片资源） */
+  /** 顶部品牌字标：蓝色圆角方块 + 白色播放三角 + 文字（对齐设计稿） */
   @Builder
   brandRow() {
     Row({ space: 0 }) {
-      Text('▶').fontSize(13).fontColor(Theme.ON_ACCENT)
-        .width(28).height(28).textAlign(TextAlign.Center)
-        .borderRadius(9).backgroundColor(Theme.ACCENT)
+      Stack() {
+        Column().width(28).height(28).borderRadius(9).backgroundColor('#5E83AD')
+        Path()
+          .width(28).height(28)
+          .commands(iconFillPath('movie', 28))
+          .fill(Theme.ON_ACCENT)
+          .antiAlias(true)
+      }.width(28).height(28)
       Text('时光影院').fontSize(23).fontWeight(FontWeight.Bold).fontColor(Theme.INK)
         .padding({ left: 10, right: 12 })
       Blank()
@@ -562,20 +568,13 @@ struct Index {
       Column({ space: 18 }) {
         this.brandRow()
 
-        // 入口格子：与 Android 手机端一致，一行五个，九个入口分两行
-        Row({ space: 2 }) {
-          this.navTile('▤', '电影', this.recommendType === 'movie', () => { this.setMediaType('movie'); })
-          this.navTile('▣', '点播', this.recommendType === 'tv', () => { this.setMediaType('tv'); })
-          this.navTile('✦', '综艺', this.recommendType === 'show', () => { this.setMediaType('show'); })
-          this.navTile('⌕', '搜索', false, () => { this.goSearch(); })
-          this.navTile('◉', '直播', false, () => { this.goLive(); })
-        }.width('100%')
-        Row({ space: 2 }) {
-          this.navTile('◷', '继续', false, () => { this.goHistory(); })
-          this.navTile('♧', this.favoriteCount > 0 ? `追剧·${this.favoriteCount}` : '追剧', false, () => { this.goFavorites(); })
-          this.navTile('≣', '片源', false, () => { this.goSourceManage(); })
-          this.navTile('☼', '设置', false, () => { router.pushUrl({ url: 'pages/Settings' }); })
-          Column().layoutWeight(1)
+        // 入口格子：一行五个（点播 / 直播 / 搜索 / 追剧 / 设置），与设计稿一致
+        Row({ space: 15 }) {
+          this.navTile('tv', '点播', this.recommendType === 'tv', () => { this.setMediaType('tv'); })
+          this.navTile('live', '直播', false, () => { this.goLive(); })
+          this.navTile('search', '搜索', false, () => { this.goSearch(); })
+          this.navTile('fav', '追剧', false, () => { this.goFavorites(); })
+          this.navTile('setup', '设置', false, () => { router.pushUrl({ url: 'pages/Settings' }); })
         }.width('100%')
 
         if (this.statusMsg !== '') {

@@ -7,16 +7,16 @@
 
 ## 安装包
 
-仓库根目录的 `ShiguangCinema-HarmonyOS-v1.0.0-unsigned.hap` 是**未签名**构建，
+仓库根目录的 `ShiguangCinema-HarmonyOS-v1.0.1-unsigned.hap` 是**未签名**构建，
 需要自行签名后才能装到设备上（见下方「签名」）。
 
 - bundleName：`com.lshai.shiguangcinema`
-- versionName：`1.0.0` / versionCode：`10000`
+- versionName：`1.0.1` / versionCode：`10001`
 - deviceTypes：`phone`
 
 ## 功能
 
-- 首页：九个入口（电影 / 点播 / 综艺 / 搜索 / 直播 / 继续 / 追剧 / 片源 / 设置）、
+- 首页：五个入口（点播 / 直播 / 搜索 / 追剧 / 设置，图标为矢量路径绘制）、
   最近观看、最新热门推荐（支持「混合 / 最新 / 热门 / 高分」榜单切换）
 - 搜索：服务端聚合 + 直连采集源并行，失败自动回退
 - 详情：选集、续播、追剧

@@ -48,6 +48,8 @@ export class Theme {
   static readonly RADIUS_CARD: number = 16;
   /** 入口格子圆角 */
   static readonly RADIUS_TILE: number = 14;
+  /** 首页选中的入口格子底色（按设计稿取样，比主色更沉一点） */
+  static readonly TILE_ACTIVE: string = '#34736E';
   /** 列表行圆角 */
   static readonly RADIUS_ROW: number = 12;
 }
