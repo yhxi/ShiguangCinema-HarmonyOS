@@ -18,6 +18,9 @@ struct SearchPage {
   @State items: SearchItem[] = [];
 
   private session: Session = Session.getInstance();
+  private searchGeneration: number = 0;
+
+  aboutToDisappear(): void { this.searchGeneration++; }
 
   aboutToAppear(): void {
     const params = router.getParams() as Record<string, string> | undefined;
@@ -33,39 +36,50 @@ struct SearchPage {
     if (kw === '' || api === null) {
       return;
     }
+    const generation = ++this.searchGeneration;
     this.searching = true;
     this.statusMsg = '搜索中…';
     this.items = [];
-
-    // Search eligible sources directly; use the server only for ineligible or failed sources.
     const fallback: SourceConfig[] = [];
-    const directTasks: Promise<void>[] = [];
-    const sources = this.session.enabledSources();
-    for (const src of sources) {
-      if (!this.session.directCms.shouldTryDirect(src)) {
-        fallback.push(src);
-      } else {
-        directTasks.push(this.session.directCms.search(src, kw).then((list: SearchItem[]) => {
-          this.mergeItems(list);
-          this.statusMsg = `搜索中，已找到 ${this.items.length} 条`;
-        }).catch(() => { fallback.push(src); }));
-      }
+    const direct: SourceConfig[] = [];
+    for (const src of this.session.enabledSources()) {
+      if (this.session.directCms.shouldTryDirect(src)) { direct.push(src); }
+      else { fallback.push(src); }
     }
     const initialFallback = fallback.splice(0, fallback.length);
     const serverTask: Promise<void> = initialFallback.length > 0
-      ? api.search(kw, initialFallback).then((r) => { this.mergeItems(r.items); }).catch(() => {})
-      : Promise.resolve();
-    await Promise.all([serverTask, ...directTasks]);
+      ? api.search(kw, initialFallback).then((r) => {
+        if (generation === this.searchGeneration) { this.mergeItems(r.items); }
+      }).catch(() => {}) : Promise.resolve();
+    let next = 0;
+    const run = async (): Promise<void> => {
+      while (generation === this.searchGeneration && next < direct.length) {
+        const src = direct[next++];
+        try {
+          const list = await this.session.directCms.search(src, kw);
+          if (generation !== this.searchGeneration) { return; }
+          this.mergeItems(list);
+          this.statusMsg = `搜索中，已找到 ${this.items.length} 条`;
+        } catch (e) {
+          if (generation === this.searchGeneration) { fallback.push(src); }
+        }
+      }
+    };
+    await Promise.all([serverTask, run(), run(), run(), run()]);
+    if (generation !== this.searchGeneration) { return; }
     if (fallback.length > 0) {
       try {
         const result = await api.search(kw, fallback);
+        if (generation !== this.searchGeneration) { return; }
         this.mergeItems(result.items);
       } catch (e) {
+        if (generation !== this.searchGeneration) { return; }
         if (this.items.length === 0) { this.statusMsg = `搜索失败：${(e as Error).message}`; }
       }
     }
-
+    if (generation !== this.searchGeneration) { return; }
     this.searching = false;
+    this.session.rememberSearch(kw, this.items);
     if (this.items.length === 0 && !this.statusMsg.startsWith('搜索失败')) {
       this.statusMsg = '没有结果';
     } else if (this.items.length > 0) {

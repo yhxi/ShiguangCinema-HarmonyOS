@@ -19,11 +19,12 @@ const PACK_OPTIONS: image.PackingOption = { format: 'image/jpeg', quality: 82 };
  * 海报缓存：内存 LRU + 磁盘两层。
  *   · 内存命中直接用；磁盘命中解码后进内存，不再走网络
  *   · 逐出的 PixelMap 不立即 release（可能还被画面上的 Image 引用着），
- *     放进"墓地"延迟 2 分钟再释放 —— 内存有界，也不会用后释放
+ *     放进"墓地"延迟 2 分钟再放弃缓存引用，交由系统管理生命周期
  *   · 磁盘上限 300 张，超出按修改时间删最旧的
  */
 class PosterCache {
   private static images: Map<string, image.PixelMap> = new Map();
+  private static failures: Map<string, number> = new Map();
   private static pending: Map<string, Promise<image.PixelMap | null>> = new Map();
   private static active: number = 0;
   private static waiting: Array<() => void> = [];
@@ -36,9 +37,9 @@ class PosterCache {
   private static readonly GRAVEYARD_MS: number = 120000;
 
   static clear(): void {
-    PosterCache.images.forEach((bitmap: image.PixelMap) => { bitmap.release().catch(() => {}); });
     PosterCache.images.clear();
-    PosterCache.releaseGraveyard(true);
+    PosterCache.graveyard = [];
+    PosterCache.failures.clear();
     PosterCache.diskBroken = false;
   }
 
@@ -55,11 +56,21 @@ class PosterCache {
       return cached;
     }
     const pendingKey = `${url}|${proxy}|${cookie}`;
+    const failedAt = PosterCache.failures.get(pendingKey);
+    if (failedAt !== undefined && Date.now() - failedAt < 300000) { return null; }
+    PosterCache.failures.delete(pendingKey);
     const existing = PosterCache.pending.get(pendingKey);
     if (existing !== undefined) { return existing; }
     const job = PosterCache.load(url, proxy, cookie);
     PosterCache.pending.set(pendingKey, job);
-    try { return await job; } finally { PosterCache.pending.delete(pendingKey); }
+    try {
+      const result = await job;
+      if (result === null) {
+        if (PosterCache.failures.size >= 300) { PosterCache.failures.clear(); }
+        PosterCache.failures.set(pendingKey, Date.now());
+      }
+      return result;
+    } finally { PosterCache.pending.delete(pendingKey); }
   }
 
   private static async load(url: string, proxy: string, cookie: string): Promise<image.PixelMap | null> {
@@ -100,7 +111,7 @@ class PosterCache {
       if (first !== '') {
         const victim = PosterCache.images.get(first);
         if (victim !== undefined) {
-          // 不能立刻 release：画面上的 Image 可能还引用着它，延迟两分钟再还
+          // 画面上的 Image 可能还引用着它，先延迟移除缓存引用
           const item: GraveyardItem = { bitmap: victim, at: Date.now() };
           PosterCache.graveyard.push(item);
         }
@@ -110,14 +121,14 @@ class PosterCache {
     PosterCache.images.set(url, bitmap);
   }
 
-  /** 墓地里的位图超过宽限期才真正释放 */
+  /** 超过宽限期后放弃缓存引用，不主动释放可能仍在显示的位图 */
   private static releaseGraveyard(force: boolean): void {
     if (PosterCache.graveyard.length === 0) { return; }
     const now = Date.now();
     const keep: GraveyardItem[] = [];
     for (const item of PosterCache.graveyard) {
       if (force || now - item.at >= PosterCache.GRAVEYARD_MS) {
-        item.bitmap.release().catch(() => {});
+        // Drop our reference; the UI may still hold the PixelMap.
       } else {
         keep.push(item);
       }
@@ -225,10 +236,11 @@ export struct PosterImage {
   @State bitmap: image.PixelMap | null = null;
   private active: boolean = true;
 
-  aboutToAppear(): void { this.loadPoster(); }
+  aboutToAppear(): void { this.active = true; this.loadPoster(); }
 
   private loadPoster(): void {
-    if (this.url === '') { return; }
+    if (this.url === '') { this.bitmap = null; return; }
+    this.bitmap = null;
     const requested = this.url;
     PosterCache.get(getContext(this), requested, this.proxy, this.cookie).then((bitmap: image.PixelMap | null) => {
       if (this.active && this.url === requested) { this.bitmap = bitmap; }

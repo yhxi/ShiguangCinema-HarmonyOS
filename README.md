@@ -7,11 +7,11 @@
 
 ## 安装包
 
-仓库根目录的 `ShiguangCinema-HarmonyOS-v1.1.2-unsigned.hap` 是**未签名**构建，
+仓库根目录的 `ShiguangCinema-HarmonyOS-v1.1.3-unsigned.hap` 是**未签名**构建，
 需要自行签名后才能装到设备上（见下方「签名」）。
 
 - bundleName：`com.lshai.shiguangcinema`
-- versionName：`1.1.2` / versionCode：`10102`
+- versionName：`1.1.3` / versionCode：`10103`
 - deviceTypes：`phone`
 
 ## 功能
@@ -69,9 +69,8 @@ sign-hap.cmd
 
 - 焦点体系：Android 版面向遥控器（D-pad 焦点描边、自动聚焦），鸿蒙包目前只声明
   `phone`，触摸交互不需要焦点态，因此没有移植这一层。
-- 检查更新：Android 版走 GitHub Releases 下载 APK 并安装；鸿蒙这边尚未接入
-  分发源，且未签名 HAP 无法直接安装。
-- 崩溃日志：目前只有入口，未落地应用内记录。
+- 检查更新：鸿蒙版从 GitHub Releases 下载未签名 HAP，需交给其他应用签名 / 安装。
+- 崩溃日志：记录最近一次全局异常的类型和应用内位置，不保存原始消息或堆栈。
 - 播放设置少 4 项：解码方式、缓存上限、起播缓冲、自动跳片头片尾——
   AVPlayer 没有对应 API，片头片尾也还没有全局开关字段。
 - 「换源」与「只看可用源」：依赖 Android 版的全局搜索结果缓存，鸿蒙侧尚未实现。

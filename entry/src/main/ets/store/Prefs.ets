@@ -70,6 +70,23 @@ export class Prefs {
   private static instance: Prefs | null = null;
   private store: preferences.Preferences | null = null;
 
+  async recordCrash(err: Error): Promise<void> {
+    // Do not persist messages, URLs, credentials or raw stacks from external data.
+    const name = (err.name ?? 'Error').replace(/[^A-Za-z0-9_.-]/g, '').slice(0, 80);
+    const lines = (err.stack ?? '').split('\n').filter((line: string) =>
+      line.includes('entry/src/main/ets/')).map((line: string) => {
+      const match = line.match(/entry\/src\/main\/ets\/[A-Za-z0-9_./-]+(?::[0-9]+){0,2}/);
+      return match === null ? '' : match[0];
+    }).filter((line: string) => line !== '').slice(0, 20);
+    const text = `${new Date().toISOString()}\n${name}\n${lines.join('\n')}`;
+    await (this.store as preferences.Preferences).put('lastCrash', text);
+    await (this.store as preferences.Preferences).flush();
+  }
+
+  async getCrashLog(): Promise<string> {
+    return s((this.store as preferences.Preferences).getSync('lastCrash', ''));
+  }
+
   async getSkipMarks(title: string): Promise<SkipMarks> {
     const raw = s((this.store as preferences.Preferences).getSync(`skip:${title.trim().toLowerCase()}`, ''));
     if (raw === '') { return { introEndMs: 90000, outroStartMs: 0, autoIntro: false, autoOutro: false }; }

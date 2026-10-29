@@ -5,7 +5,7 @@
 
 import { Api } from '../api/Api';
 import { DirectCms } from '../api/DirectCms';
-import { AppStatus, SourceConfig, builtInSources } from '../api/Models';
+import { AppStatus, SourceConfig, SearchItem, builtInSources } from '../api/Models';
 
 export class Session {
   private static instance: Session | null = null;
@@ -16,6 +16,20 @@ export class Session {
   sources: SourceConfig[] = [];
   readonly directCms: DirectCms = new DirectCms();
   private connectionGeneration: number = 0;
+  private searchCacheServer: string = '';
+  private searchCacheKeyword: string = '';
+  private searchCacheItems: SearchItem[] = [];
+
+  rememberSearch(keyword: string, items: SearchItem[]): void {
+    this.searchCacheServer = this.serverUrl;
+    this.searchCacheKeyword = keyword.trim();
+    this.searchCacheItems = items.slice();
+  }
+
+  cachedSearch(keyword: string): SearchItem[] {
+    if (this.searchCacheServer !== this.serverUrl || this.searchCacheKeyword !== keyword.trim()) { return []; }
+    return this.searchCacheItems.slice();
+  }
 
   invalidateConnection(): void { this.connectionGeneration++; }
 

@@ -1,3 +1,4 @@
+import { pasteboard } from '@kit.BasicServicesKit';
 import { promptAction, router, window } from '@kit.ArkUI';
 import { bundleManager, common } from '@kit.AbilityKit';
 import { clearPosterCache } from '../components/PosterImage';
@@ -132,8 +133,18 @@ struct SettingsPage {
     }
   }
 
-  private showCrashInfo(): void {
-    promptAction.showToast({ message: '暂未发现可读取的崩溃记录，可通过开发者工具导出 hilog' });
+  private async showCrashInfo(): Promise<void> {
+    if (this.prefs === null) { promptAction.showToast({ message: '存储尚未就绪' }); return; }
+    const log = await this.prefs.getCrashLog();
+    if (log === '') { promptAction.showToast({ message: '暂无崩溃记录' }); return; }
+    const result = await promptAction.showDialog({
+      title: '最近一次异常', message: log,
+      buttons: [{ text: '关闭', color: Theme.INK }, { text: '复制', color: Theme.ACCENT }]
+    });
+    if (result.index === 1) {
+      await pasteboard.getSystemPasteboard().setData(pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, log));
+      promptAction.showToast({ message: '已复制' });
+    }
   }
 
   @Builder

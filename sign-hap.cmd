@@ -16,7 +16,7 @@ set ALIAS=shiguang
 set ALIAS_PWD=%SIGN_PWD%
 set CERT=%PROJECT_HOME%sign\shiguang-debug.cer
 set PROFILE=%PROJECT_HOME%sign\shiguang-debug.p7b
-set OUT=%PROJECT_HOME%dist\shiguang-1.1.2-debug-signed.hap
+set OUT=%PROJECT_HOME%dist\shiguang-1.1.3-debug-signed.hap
 set IN=%PROJECT_HOME%entry\build\default\outputs\default\entry-default-unsigned.hap
 
 if not exist "%CERT%" (

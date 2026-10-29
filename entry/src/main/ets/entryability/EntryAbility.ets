@@ -13,8 +13,8 @@ export default class EntryAbility extends UIAbility {
     try {
       if (typeof errorManager.on === 'function') {
         errorManager.on('globalErrorOccurred', (err: Error) => {
-          hilog.error(DOMAIN, TAG, 'UNHANDLED JS ERROR: %{public}s', err.message);
-          hilog.error(DOMAIN, TAG, 'STACK: %{public}s', err.stack ?? '(no stack)');
+          hilog.error(DOMAIN, TAG, 'UNHANDLED JS ERROR');
+          Prefs.get(this.context).then((prefs: Prefs) => prefs.recordCrash(err)).catch(() => {});
         });
       }
     } catch (e) {

@@ -4,7 +4,7 @@
  *   · 续播（进入即 seek 到上次进度）
  *   · 上一集/下一集、自动连播（播完自动下一集）
  *   · 进度条拖动、暂停/播放
- *   · 每 5 秒与退出时写观看历史（Prefs）
+ *   · 每 30 秒与退出时写观看历史（Prefs）
  */
 
 import { media } from '@kit.MediaKit';
@@ -18,7 +18,7 @@ import { wantAgent } from '@kit.AbilityKit';
 import { fitVideoFrame } from './VideoLayout';
 import { Prefs, PlaybackSettings, SkipMarks, WatchEntry, entryFromStatus } from '../store/Prefs';
 import { Session } from '../store/Session';
-import { SourceConfig } from '../api/Models';
+import { SourceConfig, SearchItem, Detail } from '../api/Models';
 
 interface PlayerMenuAction { label: string; action: () => void; }
 interface PlayerTrack { index: number; type: number; label: string; }
@@ -574,6 +574,7 @@ struct Player {
 
   /** 换源后重建地址列表；episodeIndex 越界时从头放 */
   private async switchToNextSource(): Promise<void> {
+    const generation = this.playerGeneration;
     const api = this.session.api;
     if (api === null || this.title.trim() === '') {
       this.finishHealFail('没有可用的服务端');
@@ -584,37 +585,56 @@ struct Player {
       this.finishHealFail('其他片源都已尝试过');
       return;
     }
+    const cached = this.session.cachedSearch(this.title.trim());
+    if (await this.trySourceCandidates(cached, generation)) { return; }
+    if (this.disposed || generation !== this.playerGeneration) { return; }
     try {
-      const result = await api.search(this.title.trim(), sources);
-      for (const item of result.items) {
-        if (item.name !== this.title.trim() || this.triedSourceUrls.has(item.sourceUrl)) { continue; }
-        this.triedSourceUrls.add(item.sourceUrl);
-        const src = this.findSourceByUrl(item.sourceUrl);
-        if (src === null) { continue; }
-        const detail = await api.detail(item.vodId, src);
-        if (detail.episodes.length === 0) { continue; }
-        this.episodes = detail.episodes;
-        this.sourceUrl = item.sourceUrl;
-        this.vodId = item.vodId;
-        if (this.episodeIndex >= this.episodes.length) { this.episodeIndex = 0; }
-        this.cover = detail.info.cover !== '' ? detail.info.cover : this.cover;
-        this.usePlainUrl = true;
-        this.alternateTried = false;
-        this.sameUrlRetried = false;
-        this.sourceSwitchTried = false;
-        this.curMs = 0;
-        this.durMs = 0;
-        this.switching = false;
-        this.gestureMessage = `已切换片源：${item.sourceName}`;
-        if (this.hudTimer >= 0) { clearTimeout(this.hudTimer); }
-        this.hudTimer = setTimeout(() => { this.gestureMessage = ''; }, 2500);
-        this.setupPlayer();
-        return;
+      const remaining = sources.filter((src: SourceConfig) => !this.triedSourceUrls.has(src.url));
+      if (remaining.length > 0) {
+        const result = await api.search(this.title.trim(), remaining);
+        if (this.disposed || generation !== this.playerGeneration) { return; }
+        if (await this.trySourceCandidates(result.items, generation)) { return; }
       }
     } catch (e) {
-      hilog.warn(0, 'ShiguangCinema', 'source switch failed: %{public}s', (e as Error).message);
+      hilog.warn(0, 'ShiguangCinema', 'source switch search failed');
     }
-    this.finishHealFail('其他片源也没有可播放的地址');
+    if (!this.disposed && generation === this.playerGeneration) {
+      this.finishHealFail('其他片源也没有可播放的地址');
+    }
+  }
+
+  private async trySourceCandidates(items: SearchItem[], generation: number): Promise<boolean> {
+    const api = this.session.api;
+    if (api === null) { return false; }
+    for (const item of items) {
+      if (this.disposed || generation !== this.playerGeneration) { return false; }
+      if (item.name !== this.title.trim() || this.triedSourceUrls.has(item.sourceUrl)) { continue; }
+      const src = this.findSourceByUrl(item.sourceUrl);
+      if (src === null || !src.enabled) { continue; }
+      this.triedSourceUrls.add(item.sourceUrl);
+      let detail: Detail;
+      try { detail = await api.detail(item.vodId, src); } catch (e) { continue; }
+      if (this.disposed || generation !== this.playerGeneration) { return false; }
+      if (detail.episodes.length === 0) { continue; }
+      this.episodes = detail.episodes;
+      this.sourceUrl = item.sourceUrl;
+      this.vodId = item.vodId;
+      if (this.episodeIndex >= this.episodes.length) { this.episodeIndex = 0; }
+      this.cover = detail.info.cover !== '' ? detail.info.cover : this.cover;
+      this.usePlainUrl = true;
+      this.alternateTried = false;
+      this.sameUrlRetried = false;
+      this.sourceSwitchTried = false;
+      this.curMs = 0;
+      this.durMs = 0;
+      this.switching = false;
+      this.gestureMessage = `已切换片源：${item.sourceName}`;
+      if (this.hudTimer >= 0) { clearTimeout(this.hudTimer); }
+      this.hudTimer = setTimeout(() => { this.gestureMessage = ''; }, 2500);
+      this.setupPlayer();
+      return true;
+    }
+    return false;
   }
 
   private findSourceByUrl(url: string): SourceConfig | null {
@@ -864,10 +884,14 @@ struct Player {
     }
   }
 
+  private saveTick: number = 0;
+
   private startSaveTimer(): void {
     this.stopSaveTimer();
+    this.saveTick = 0;
     this.saveTimerId = setInterval(() => {
-      this.saveProgress(false);
+      this.saveTick++;
+      if (this.saveTick % 6 === 0) { this.saveProgress(false); }
       if (this.backgroundSession !== null) { this.updateBackgroundSession(this.playing); }
     }, 5000);
   }
