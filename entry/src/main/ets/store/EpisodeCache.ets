@@ -170,10 +170,11 @@ export class EpisodeCache {
     EpisodeCache.scheduleWrite();
   }
 
-  static clear(context: Context): void {
+  static clear(context: Context): boolean {
     const records = EpisodeCache.ensure(context);
     records.clear();
-    EpisodeCache.scheduleWrite();
+    if (EpisodeCache.writeTimer >= 0) { clearTimeout(EpisodeCache.writeTimer); EpisodeCache.writeTimer = -1; }
+    return EpisodeCache.flush();
   }
 
   static count(context: Context): number {
@@ -191,10 +192,10 @@ export class EpisodeCache {
     }, 1200);
   }
 
-  static flush(): void {
+  static flush(): boolean {
     const records = EpisodeCache.records;
     if (records === null || EpisodeCache.filePath === '') {
-      return;
+      return false;
     }
     const root: Record<string, Object> = {};
     records.forEach((record: EpisodeRecord, key: string) => {
@@ -212,8 +213,10 @@ export class EpisodeCache {
       } finally {
         fs.closeSync(file);
       }
+      return true;
     } catch (e) {
       // 写盘失败只影响下次冷启动的体验
+      return false;
     }
   }
 }

@@ -98,7 +98,7 @@ struct SourceManage {
       return;
     }
     this.sources = await this.prefs.getSources(this.session.serverUrl);
-    if (this.sources.length === 0) {
+    if (!(await this.prefs.hasSources(this.session.serverUrl))) {
       this.sources = this.session.sources;
       await this.prefs.setSources(this.session.serverUrl, this.sources);
     }

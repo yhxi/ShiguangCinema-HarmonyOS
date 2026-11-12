@@ -1,7 +1,7 @@
 import { pasteboard } from '@kit.BasicServicesKit';
 import { promptAction, router, window } from '@kit.ArkUI';
 import { bundleManager, common } from '@kit.AbilityKit';
-import { clearPosterCache } from '../components/PosterImage';
+import { clearDetailCache } from '../store/DetailCache';
 import { Session } from '../store/Session';
 import { Prefs, UpdateState } from '../store/Prefs';
 import { ChildrenQuota } from '../store/ChildrenQuota';
@@ -79,10 +79,11 @@ struct SettingsPage {
   }
 
   private clearCache(): void {
-    clearPosterCache();
-    // 选集列表缓存也一起清，否则用户点了清理还会看到旧的集数
-    EpisodeCache.clear(getContext(this));
-    promptAction.showToast({ message: '图片与选集缓存已清理' });
+    const cleared = EpisodeCache.clear(getContext(this));
+    clearDetailCache();
+    this.session.clearSearchCache();
+    promptAction.showToast({ message: cleared ? '选集、详情和搜索缓存已清理，海报已保留' :
+      '内存缓存已清理，选集缓存清理失败；海报已保留' });
   }
 
   private showUpdateInfo(): void {

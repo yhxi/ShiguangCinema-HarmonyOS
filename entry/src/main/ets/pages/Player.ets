@@ -111,6 +111,8 @@ struct Player {
   private quotaLastAt: number = 0;
   private quotaPausePending: boolean = false;
   private quota: ChildrenQuota | null = null;
+  private quotaReady: boolean = false;
+  private quotaInitFailed: boolean = false;
   @State availableBitrates: number[] = [];
   @State selectedBitrate: number = 0;
   @State mediaTracks: PlayerTrack[] = [];
@@ -229,19 +231,27 @@ struct Player {
       }
     }, 8000);
     Prefs.get(getContext(this)).then((p: Prefs) => {
+      if (this.disposed) { return; }
       this.prefs = p;
       ChildrenQuota.get(p).then((quota: ChildrenQuota) => {
+        if (this.disposed) { return; }
         this.quota = quota;
         this.childManaged = !this.isLive && quota.isManaged(this.title);
         this.startQuotaTimer();
-      }).catch(() => {});
+        this.quotaReady = true;
+        this.onSettingsReady();
+      }).catch(() => {
+        if (!this.disposed) { this.quotaInitFailed = true; this.onSettingsReady(); }
+      });
       p.getSkipMarks(this.title).then((marks: SkipMarks) => {
+        if (this.disposed) { return; }
         this.introEndMs = marks.introEndMs; this.outroStartMs = marks.outroStartMs;
         this.autoIntro = marks.autoIntro; this.autoOutro = marks.autoOutro;
         this.outroRemainingMs = marks.outroRemainingMs; this.outroReferenceMs = marks.outroReferenceMs;
         this.marksLoaded = true;
       }).catch(() => {});
       p.getPlaybackSettings().then((settings: PlaybackSettings) => {
+        if (this.disposed) { return; }
         if (settings.speedIndex >= 0 && settings.speedIndex < this.speeds.length) { this.speedIndex = settings.speedIndex; }
         this.autoNext = settings.autoNext;
         this.seekStepSeconds = settings.seekStepSeconds;
@@ -253,13 +263,16 @@ struct Player {
         if (!this.isLive && this.speedIndex !== 1 && this.playing && this.player !== null) {
           try { this.player.setSpeed(this.speeds[this.speedIndex]); } catch (e) { /* Stream may not support speed changes. */ }
         }
-      }).catch(() => {}).finally(() => { this.onSettingsReady(); });
-    }).catch(() => { this.onSettingsReady(); });
+      }).catch(() => {}).finally(() => { this.settingsReady = true; this.onSettingsReady(); });
+    }).catch(() => {
+      if (!this.disposed) { this.quotaInitFailed = true; this.settingsReady = true; this.onSettingsReady(); }
+    });
   }
 
   private onSettingsReady(): void {
     if (this.disposed) { return; }
-    this.settingsReady = true;
+    if (this.quotaInitFailed) { this.loadMessage = ''; this.errorMsg = '儿童时间设置读取失败，请返回后重试'; return; }
+    if (!this.settingsReady || !this.quotaReady) { return; }
     if (this.surfaceReady && this.player === null && !this.switching) { this.setupPlayer(); }
   }
 
@@ -348,8 +361,8 @@ struct Player {
       if (sid === '') { throw new Error('视频窗口尚未创建'); }
       this.surfaceId = sid;
       this.surfaceReady = true;
-      if (this.settingsReady) { await this.setupPlayer(); }
-      else { this.loadMessage = '正在读取播放设置…'; }
+      if (this.settingsReady && this.quotaReady && !this.quotaInitFailed) { await this.setupPlayer(); }
+      else if (!this.quotaInitFailed) { this.loadMessage = '正在读取播放设置…'; }
     } catch (e) {
       this.loadMessage = '';
       this.errorMsg = `视频窗口初始化失败：${(e as Error).message}`;
@@ -444,6 +457,10 @@ struct Player {
         this.applyScale();
         p.setVolume(this.volumeLevel);
         this.refreshTracks(p, generation);
+        if (!this.canStartForQuota()) {
+          this.switching = false; this.loadMessage = ''; this.stopStartupTimer(); this.showControls = true;
+          return;
+        }
         p.play().catch((e: Error) => {
           if (this.disposed || generation !== this.playerGeneration) { return; }
           if (this.handlePlaybackFailure((e as BusinessError).code, generation)) { return; }
@@ -454,6 +471,9 @@ struct Player {
         });
       } else if (state === 'playing') {
         this.playing = true;
+        if (this.childManaged && this.quota !== null && this.quota.isExhausted()) {
+          this.switching = false; this.stopStartupTimer(); this.pauseForQuota(); return;
+        }
         this.isPaused = false;
         this.buffering = false;
         this.stopSpeedTimer();
@@ -489,6 +509,7 @@ struct Player {
         this.saveProgress(false);
         if (!this.locked) { this.showControls = true; }
       } else if (state === 'completed') {
+        if (this.durMs > 0) { this.curMs = this.durMs; this.saveProgress(false); }
         this.playing = false;
         this.updateBackgroundSession(false);
         this.stopBackgroundTask();
@@ -808,10 +829,8 @@ struct Player {
         this.saveProgress(false);
       });
     } else {
-      p.play().then(() => {
-        this.playing = true;
-        this.scheduleHide();
-      });
+      if (!this.canStartForQuota()) { return; }
+      p.play().then(() => { this.scheduleHide(); }).catch(() => { this.notify('无法继续播放'); });
     }
   }
 
@@ -820,7 +839,9 @@ struct Player {
     try {
       if (this.backgroundSession === null) {
         const session = await avSession.createAVSession(getContext(this), 'ShiguangCinema', 'video');
-        session.on('play', () => { this.player?.play().catch(() => {}); });
+        session.on('play', () => {
+          if (this.canStartForQuota()) { this.player?.play().catch(() => {}); }
+        });
         session.on('pause', () => { this.player?.pause().catch(() => {}); });
         session.on('stop', () => { this.player?.pause().catch(() => {}); });
         this.backgroundSession = session;
@@ -1075,6 +1096,15 @@ struct Player {
 
   // ---------------------------------------------------------------- 儿童额度
 
+  private canStartForQuota(): boolean {
+    if (!this.quotaReady || this.quotaInitFailed) { this.notify('儿童时间设置尚未就绪'); return false; }
+    if (this.childManaged && this.quota !== null && this.quota.isExhausted()) {
+      this.notify('今天的儿童时间已用完，明天再来吧');
+      return false;
+    }
+    return true;
+  }
+
   /** 按经过时间计费，并在播放与缓冲状态变化时结算。 */
   private accountQuota(): void {
     const now = Date.now();
@@ -1105,7 +1135,8 @@ struct Player {
 
   private pauseForQuota(): void {
     const p = this.player;
-    if (p === null || this.quotaPausePending) { return; }
+    if (p === null || this.quotaPausePending || p.state === 'paused' ||
+      p.state === 'completed' || p.state === 'stopped') { return; }
     this.quotaPausePending = true;
     p.pause().then(() => {
       this.playing = false;
@@ -1113,7 +1144,12 @@ struct Player {
       this.saveProgress(true);
       this.showControls = true;
       this.notify('今天的儿童时间已用完，明天再来吧');
-    }).catch(() => {}).finally(() => { this.quotaPausePending = false; });
+    }).catch(() => {
+      if (this.disposed || this.player !== p) { return; }
+      this.playerGeneration++; this.player = null; this.playing = false; this.switching = false;
+      this.stopStartupTimer(); p.release().catch(() => {});
+      this.errorMsg = '儿童时间已用完，暂停失败，请返回'; this.showControls = true;
+    }).finally(() => { this.quotaPausePending = false; });
   }
 
   /** 底部「换源」：带着片名去搜索，让用户挑另一个片源（v1.3.11 起常驻底部操作栏） */

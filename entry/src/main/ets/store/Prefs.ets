@@ -243,6 +243,11 @@ export class Prefs {
     await this.putMap(KEY_COOKIES, map);
   }
 
+  /** Distinguish an explicitly saved empty list from a server without saved sources. */
+  async hasSources(serverUrl: string): Promise<boolean> {
+    return (await this.getMap(KEY_SOURCES)).has(serverUrl);
+  }
+
   /** 保存合并后的片源列表（按服务端分开） */
   async getSources(serverUrl: string): Promise<SourceConfig[]> {
     const map = await this.getMap(KEY_SOURCES);
@@ -292,6 +297,13 @@ export class Prefs {
   }
 
   private historyCache: WatchEntry[] | null = null;
+  private historyWrites: Promise<void> = Promise.resolve();
+
+  private enqueueHistory(work: () => Promise<void>): Promise<void> {
+    const next = this.historyWrites.catch(() => {}).then(work);
+    this.historyWrites = next.catch(() => {});
+    return next;
+  }
 
   /** 从磁盘解析历史并写入缓存；调用方不要改动返回的数组 */
   private async loadHistoryFromDisk(): Promise<WatchEntry[]> {
@@ -328,6 +340,7 @@ export class Prefs {
   }
 
   async getHistory(): Promise<WatchEntry[]> {
+    await this.historyWrites;
     // 播放中每 5 秒就会保存一次进度，历史必须常驻内存，
     // 否则每次保存都要全量解析 + 全量序列化 100 条
     if (this.historyCache === null) {
@@ -337,6 +350,10 @@ export class Prefs {
   }
 
   async saveWatch(entry: WatchEntry): Promise<void> {
+    return this.enqueueHistory(() => this.saveWatchNow(entry));
+  }
+
+  private async saveWatchNow(entry: WatchEntry): Promise<void> {
     if (this.historyCache === null) {
       await this.loadHistoryFromDisk();
     }
@@ -366,12 +383,20 @@ export class Prefs {
   }
 
   async clearHistory(): Promise<void> {
+    return this.enqueueHistory(() => this.clearHistoryNow());
+  }
+
+  private async clearHistoryNow(): Promise<void> {
     this.historyCache = [];
     await (this.store as preferences.Preferences).put(KEY_HISTORY, '');
     await (this.store as preferences.Preferences).flush();
   }
 
   async removeWatch(key: string): Promise<void> {
+    return this.enqueueHistory(() => this.removeWatchNow(key));
+  }
+
+  private async removeWatchNow(key: string): Promise<void> {
     if (this.historyCache === null) {
       await this.loadHistoryFromDisk();
     }

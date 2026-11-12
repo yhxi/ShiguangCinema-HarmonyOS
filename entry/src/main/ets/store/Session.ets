@@ -60,9 +60,15 @@ export class Session {
     }
   }
 
+  clearSearchCache(): void { this.searchCache.clear(); }
+
+  forgetSearch(keyword: string): void { this.searchCache.delete(this.searchCacheKey(keyword)); }
+
   cachedSearch(keyword: string): SearchItem[] {
     const entry = this.searchCache.get(this.searchCacheKey(keyword));
-    return entry !== undefined ? entry.items.slice() : [];
+    if (entry === undefined) { return []; }
+    const enabled = new Set<string>(this.enabledSources().map((src: SourceConfig) => src.url));
+    return entry.items.filter((item: SearchItem) => enabled.has(item.sourceUrl));
   }
 
   invalidateConnection(): void { this.connectionGeneration++; }
@@ -79,12 +85,12 @@ export class Session {
       (!this.appStatus.passwordRequired || this.appStatus.verified);
   }
 
-  restoreCached(baseUrl: string, cookie: string, sources: SourceConfig[]): void {
+  restoreCached(baseUrl: string, cookie: string, sources: SourceConfig[], sourcesSaved: boolean = false): void {
     const api = new Api(baseUrl);
     api.restoreCookie(cookie);
     this.serverUrl = api.baseUrl;
     this.api = api;
-    this.sources = sources.length > 0 ? sources : builtInSources();
+    this.sources = sourcesSaved || sources.length > 0 ? sources : builtInSources();
   }
 
   /** 连接服务端：拉 status -> 必要时登录 -> 合并片源（服务端下发优先，内置兜底） */

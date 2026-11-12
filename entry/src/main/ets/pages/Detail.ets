@@ -11,6 +11,7 @@ import { Prefs, WatchEntry, watchKey } from '../store/Prefs';
 import { Session } from '../store/Session';
 import { ChildrenQuota } from '../store/ChildrenQuota';
 import { EpisodeCache } from '../store/EpisodeCache';
+import { DETAIL_CACHE, DETAIL_CACHE_TTL_MS, detailCacheGeneration } from '../store/DetailCache';
 import { stripHtml } from '../common/TextClean';
 import { PosterImage } from '../components/PosterImage';
 import { Theme } from '../common/Theme';
@@ -21,13 +22,6 @@ import { Theme } from '../common/Theme';
  *   命中就先渲染缓存内容，同时后台静默重新拉一次（不显示 loading、不闪屏），
  *   片源那边补了新集也能刷出来。
  */
-interface DetailCacheEntry {
-  detail: Detail;
-  at: number;
-}
-
-const DETAIL_CACHE_TTL_MS = 10 * 60 * 1000;
-const DETAIL_CACHE: Map<string, DetailCacheEntry> = new Map();
 /** 选集分段长度：上千集一次铺完会卡住首屏 */
 const EPISODE_SEGMENT = 100;
 
@@ -164,6 +158,7 @@ struct DetailPage {
   }
 
   private async loadDetail(silent: boolean = false): Promise<void> {
+    const cacheGeneration = detailCacheGeneration();
     const api = this.session.api;
     const src = this.findSource();
     if (api === null || src === null) {
@@ -182,6 +177,7 @@ struct DetailPage {
       if (direct.shouldTryDirect(src)) {
         try {
           const d = await direct.detail(src, this.vodId);
+          if (cacheGeneration !== detailCacheGeneration()) { return; }
           this.applyDetail(d);
           this.loading = false;
           return;
@@ -190,6 +186,7 @@ struct DetailPage {
         }
       }
       const d = await api.detail(this.vodId, src);
+      if (cacheGeneration !== detailCacheGeneration()) { return; }
       this.applyDetail(d);
     } catch (e) {
       // 静默刷新失败就保留缓存内容，不弹错

@@ -98,6 +98,8 @@ struct SearchPage {
   private prefs: Prefs | null = null;
   private source: SearchGroupSource = new SearchGroupSource();
   private searchGeneration: number = 0;
+  private freshResults: SearchItem[] = [];
+  private refreshFailed: boolean = false;
   /** 已经搜过的关键词：输入框内容与它不同才给联想，避免结果页被联想条顶掉 */
   private searchedKeyword: string = '';
   private pool: PoolEntry[] = [];
@@ -190,6 +192,8 @@ struct SearchPage {
       return;
     }
     const generation = ++this.searchGeneration;
+    this.freshResults = [];
+    this.refreshFailed = false;
     this.searching = true;
     this.searchedKeyword = kw;
     this.suggestions = [];
@@ -209,7 +213,7 @@ struct SearchPage {
       return;
     }
     // 一条都没搜到：把「（2023）」「：副标题」这类噪声去掉再试一次
-    if (this.groups.length === 0) {
+    if (this.freshResults.length === 0 && !this.refreshFailed) {
       const cleaned = cleanKeyword(kw);
       if (cleaned !== '' && cleaned !== kw) {
         this.statusMsg = `没搜到，改用「${cleaned}」再试…`;
@@ -219,6 +223,10 @@ struct SearchPage {
         }
       }
     }
+    if (!this.refreshFailed) {
+      this.setGroups([]);
+      this.applyIncoming(this.freshResults);
+    }
     this.searching = false;
     const flat: SearchItem[] = [];
     for (const g of this.groups) {
@@ -226,11 +234,12 @@ struct SearchPage {
         flat.push(it);
       }
     }
-    this.session.rememberSearch(kw, flat);
+    if (flat.length === 0 && !this.refreshFailed) { this.session.forgetSearch(kw); }
+    else { this.session.rememberSearch(kw, flat); }
     if (this.groups.length === 0 && !this.statusMsg.startsWith('搜索失败')) {
       this.statusMsg = '没有结果';
     } else if (this.groups.length > 0) {
-      this.statusMsg = `${this.groups.length} 部 · ${flat.length} 条来源`;
+      this.statusMsg = `${this.groups.length} 部 · ${flat.length} 条来源${this.refreshFailed ? ' · 部分来源刷新失败' : ''}`;
     }
     this.refreshSuggestions();
   }
@@ -250,7 +259,11 @@ struct SearchPage {
     const initialFallback = fallback.splice(0, fallback.length);
     const serverTask: Promise<void> = initialFallback.length > 0
       ? api.search(kw, initialFallback).then((r) => {
-        if (generation === this.searchGeneration) { this.applyIncoming(r.items); }
+        if (generation === this.searchGeneration) {
+          this.freshResults.push(...r.items);
+          if (r.failures > 0) { this.refreshFailed = true; }
+          this.applyIncoming(r.items);
+        }
       }).catch(() => {
         if (generation === this.searchGeneration) { fallback.push(...initialFallback); }
       }) : Promise.resolve();
@@ -261,6 +274,7 @@ struct SearchPage {
         try {
           const list = await this.session.directCms.search(src, kw);
           if (generation !== this.searchGeneration) { return; }
+          this.freshResults.push(...list);
           this.applyIncoming(list);
           this.statusMsg = `搜索中，已找到 ${this.groups.length} 部`;
         } catch (e) {
@@ -276,9 +290,12 @@ struct SearchPage {
       try {
         const result = await api.search(kw, fallback);
         if (generation !== this.searchGeneration) { return; }
+        this.freshResults.push(...result.items);
+        if (result.failures > 0) { this.refreshFailed = true; }
         this.applyIncoming(result.items);
       } catch (e) {
         if (generation !== this.searchGeneration) { return; }
+        this.refreshFailed = true;
         if (this.groups.length === 0) { this.statusMsg = `搜索失败：${(e as Error).message}`; }
       }
     }

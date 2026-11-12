@@ -111,9 +111,9 @@ struct Index {
           this.urlText = saved;
           this.session.restoreCached(saved, '', []);
           this.refreshHome(false);
-          const cached = await Promise.all([p.getCookie(saved), p.getSources(saved)]);
+          const cached = await Promise.all([p.getCookie(saved), p.getSources(saved), p.hasSources(saved)]);
           if (this.disposed || initAttempt !== this.connectionAttempt || this.urlText !== saved) { return; }
-          this.session.restoreCached(saved, cached[0], cached[1]);
+          this.session.restoreCached(saved, cached[0], cached[1], cached[2]);
           this.tryConnect(true);
         } else {
           this.connected = false;
@@ -232,7 +232,7 @@ struct Index {
         await this.prefs.setServerUrl(this.session.serverUrl);
         await this.prefs.setCookie(this.session.serverUrl, (this.session.api as Api).currentCookie());
         const savedSources = await this.prefs.getSources(this.session.serverUrl);
-        if (savedSources.length > 0) {
+        if (await this.prefs.hasSources(this.session.serverUrl)) {
           this.session.sources = savedSources;
         } else {
           await this.prefs.setSources(this.session.serverUrl, this.session.sources);
