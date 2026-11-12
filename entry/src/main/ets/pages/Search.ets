@@ -550,7 +550,8 @@ struct SearchPage {
             }
           }, (item: SearchItem) => `${item.sourceUrl}|${item.vodId}`)
         }
-        .width('100%').height(320).scrollBar(BarState.Off)
+        .width('100%').height(Math.min(this.pickerItems.length * 58 + 8, 320))
+        .scrollBar(BarState.Off)
         Button('取消').fontSize(15).height(44).width('100%').borderRadius(22)
           .backgroundColor(Theme.BG).fontColor(Theme.INK)
           .onClick(() => { this.pickerTitle = ''; this.pickerItems = []; })
@@ -595,6 +596,12 @@ struct SearchPage {
             .placeholderColor(Theme.SECONDARY)
             .onChange((v: string) => {
               this.keyword = v;
+              // 清空输入就回到「最近搜索」状态，而不是把上一轮结果留在屏幕上
+              if (v.trim() === '') {
+                this.searchedKeyword = '';
+                this.setGroups([]);
+                this.statusMsg = '';
+              }
               this.refreshSuggestions();
             })
             .onSubmit(() => { this.doSearch(); })

@@ -28,6 +28,8 @@ interface DetailCacheEntry {
 
 const DETAIL_CACHE_TTL_MS = 10 * 60 * 1000;
 const DETAIL_CACHE: Map<string, DetailCacheEntry> = new Map();
+/** 选集分段长度：上千集一次铺完会卡住首屏 */
+const EPISODE_SEGMENT = 100;
 
 @Entry
 @Component
@@ -46,6 +48,8 @@ struct DetailPage {
   /** 该片是否已纳入儿童每日额度（v1.3.7/v1.3.8：详情页提供加入入口） */
   @State kidManaged: boolean = false;
   @State kidLabel: string = '';
+  /** 当前选集分段（每段 100 集） */
+  @State epSegment: number = 0;
 
   private session: Session = Session.getInstance();
   private sourceUrl: string = '';
@@ -114,6 +118,7 @@ struct DetailPage {
     if (this.lastWatch !== null && this.lastWatch.episodeIndex >= 0 &&
       this.lastWatch.episodeIndex < urls.length) {
       this.selected = this.lastWatch.episodeIndex;
+      this.focusSegment(this.lastWatch.episodeIndex);
     }
     return true;
   }
@@ -201,6 +206,7 @@ struct DetailPage {
     if (this.lastWatch !== null && this.lastWatch.episodeIndex >= 0 &&
       this.lastWatch.episodeIndex < d.episodes.length) {
       this.selected = this.lastWatch.episodeIndex;
+      this.focusSegment(this.lastWatch.episodeIndex);
     }
     DETAIL_CACHE.set(`${this.sourceUrl}|${this.vodId}`, { detail: d, at: Date.now() });
     EpisodeCache.put(getContext(this), this.session.serverUrl, this.sourceUrl, this.vodId, d.episodes);
@@ -365,11 +371,34 @@ struct DetailPage {
                 .backgroundColor(Theme.PANEL)
             }
 
-            Text(`选择集数（共 ${this.episodes.length} 集）`)
-              .fontSize(16).fontWeight(FontWeight.Bold).fontColor(Theme.INK).width('100%')
-              .padding({ top: 2 })
+            Row({ space: 8 }) {
+              Text(`选择集数（共 ${this.episodes.length} 集）`)
+                .fontSize(16).fontWeight(FontWeight.Bold).fontColor(Theme.INK).layoutWeight(1)
+              if (this.segmentCount() > 1) {
+                Text(`${this.segmentStart() + 1}-${this.segmentEnd()}`)
+                  .fontSize(12).fontColor(Theme.SECONDARY)
+              }
+            }.width('100%').padding({ top: 2 })
+
+            // 上千集的剧一次铺 1000 个可选格子会卡住首屏，按 100 集分段
+            if (this.segmentCount() > 1) {
+              Scroll() {
+                Row({ space: 6 }) {
+                  ForEach(this.segmentLabels(), (label: string, seg: number) => {
+                    Text(label).fontSize(12)
+                      .fontColor(this.epSegment === seg ? Theme.ON_ACCENT : Theme.INK)
+                      .padding({ left: 12, right: 12, top: 7, bottom: 7 })
+                      .borderRadius(12)
+                      .backgroundColor(this.epSegment === seg ? Theme.ACCENT : Theme.PANEL)
+                      .onClick(() => { this.epSegment = seg; })
+                  }, (label: string, seg: number) => `${seg}`)
+                }
+              }
+              .width('100%').scrollable(ScrollDirection.Horizontal).scrollBar(BarState.Off)
+            }
+
             Flex({ wrap: FlexWrap.Wrap }) {
-              ForEach(this.episodes, (url: string, idx: number) => {
+              ForEach(this.segmentIndexes(), (idx: number) => {
                 Text(this.epLabel(idx))
                   .fontSize(13)
                   .fontColor(this.selected === idx ? Theme.ON_ACCENT : Theme.INK)
@@ -378,7 +407,7 @@ struct DetailPage {
                   .borderRadius(10)
                   .backgroundColor(this.selected === idx ? Theme.ACCENT : Theme.PANEL)
                   .onClick(() => { this.playAt(idx); })
-              }, (url: string, idx: number) => `${idx}`)
+              }, (idx: number) => `${idx}`)
             }.width('100%')
           }
           .padding({ left: 16, right: 16, bottom: 28 })
@@ -395,5 +424,44 @@ struct DetailPage {
 
   private epLabel(idx: number): string {
     return idx < 100 ? `第${idx + 1}集` : `${idx + 1}`;
+  }
+
+  private segmentCount(): number {
+    return Math.max(1, Math.ceil(this.episodes.length / EPISODE_SEGMENT));
+  }
+
+  private segmentStart(): number {
+    return this.epSegment * EPISODE_SEGMENT;
+  }
+
+  private segmentEnd(): number {
+    return Math.min(this.episodes.length, this.segmentStart() + EPISODE_SEGMENT);
+  }
+
+  private segmentIndexes(): number[] {
+    const out: number[] = [];
+    for (let i = this.segmentStart(); i < this.segmentEnd(); i++) {
+      out.push(i);
+    }
+    return out;
+  }
+
+  private segmentLabels(): string[] {
+    const out: string[] = [];
+    const total = this.segmentCount();
+    for (let s = 0; s < total; s++) {
+      const from = s * EPISODE_SEGMENT + 1;
+      const to = Math.min(this.episodes.length, (s + 1) * EPISODE_SEGMENT);
+      out.push(`${from}-${to}`);
+    }
+    return out;
+  }
+
+  /** 让当前选集落在看得见的那一段里 */
+  private focusSegment(index: number): void {
+    if (index < 0) {
+      return;
+    }
+    this.epSegment = Math.floor(index / EPISODE_SEGMENT);
   }
 }

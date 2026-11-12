@@ -24,6 +24,44 @@ import { SourceConfig, SearchItem, Detail } from '../api/Models';
 interface PlayerMenuAction { label: string; action: () => void; }
 interface PlayerTrack { index: number; type: number; label: string; }
 
+/**
+ * 选集面板的数据源。
+ * 像《海贼王》这种一千多集的剧，一次性建 1000 个列表行会让面板弹出时明显卡顿；
+ * 换成 LazyForEach 之后只建面板里看得见的那几行。
+ */
+class EpisodeListSource implements IDataSource {
+  private items: string[] = [];
+  private listeners: DataChangeListener[] = [];
+
+  setItems(items: string[]): void {
+    this.items = items;
+    for (const listener of this.listeners) {
+      listener.onDataReloaded();
+    }
+  }
+
+  totalCount(): number {
+    return this.items.length;
+  }
+
+  getData(index: number): string {
+    return this.items[index];
+  }
+
+  registerDataChangeListener(listener: DataChangeListener): void {
+    if (!this.listeners.includes(listener)) {
+      this.listeners.push(listener);
+    }
+  }
+
+  unregisterDataChangeListener(listener: DataChangeListener): void {
+    const idx = this.listeners.indexOf(listener);
+    if (idx >= 0) {
+      this.listeners.splice(idx, 1);
+    }
+  }
+}
+
 /** 字节/秒 → 人类可读 */
 function formatNetSpeed(bytesPerSec: number): string {
   if (bytesPerSec >= 1024 * 1024) { return `${(bytesPerSec / 1024 / 1024).toFixed(1)} MB/s`; }
@@ -96,6 +134,8 @@ struct Player {
   private player: media.AVPlayer | null = null;
   private xcController: XComponentController = new XComponentController();
   private episodes: string[] = [];
+  /** 选集面板的数据源：上千集不能一次性建行 */
+  private episodeSource: EpisodeListSource = new EpisodeListSource();
   private sourceUrl: string = '';
   private vodId: string = '';
   private cover: string = '';
@@ -173,6 +213,7 @@ struct Player {
     if (this.episodeIndex < 0 || this.episodeIndex >= this.episodes.length) {
       this.episodeIndex = 0;
     }
+    this.episodeSource.setItems(this.episodes);
     if (isNaN(this.resumeMs)) {
       this.resumeMs = 0;
     }
@@ -632,6 +673,7 @@ struct Player {
       if (this.disposed || generation !== this.playerGeneration) { return false; }
       if (detail.episodes.length === 0) { continue; }
       this.episodes = detail.episodes;
+      this.episodeSource.setItems(this.episodes);
       this.sourceUrl = item.sourceUrl;
       this.vodId = item.vodId;
       if (this.episodeIndex >= this.episodes.length) { this.episodeIndex = 0; }
@@ -1496,7 +1538,7 @@ struct Player {
               .onClick(() => { this.showEpisodes = false; this.scheduleHide(); })
           }.width('100%')
           List({ space: 5 }) {
-            ForEach(this.episodes, (_url: string, index: number) => {
+            LazyForEach(this.episodeSource, (_url: string, index: number) => {
               ListItem() {
                 Text(this.isLive ? `频道 ${index + 1}` : `第 ${index + 1} 集`)
                   .width('100%').padding(12).borderRadius(8)
@@ -1505,7 +1547,7 @@ struct Player {
                   .onClick(() => { this.selectEpisode(index); })
               }
             }, (_url: string, index: number) => index.toString())
-          }.layoutWeight(1).width('100%')
+          }.layoutWeight(1).width('100%').cachedCount(8)
         }.width('85%').height('75%').padding(16).borderRadius(16).backgroundColor('#EE202025')
       }
 
