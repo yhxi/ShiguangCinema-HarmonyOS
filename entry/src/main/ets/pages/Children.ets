@@ -214,11 +214,16 @@ struct Children {
       if (this.showParent) {
         Column() {
           Blank()
-          ParentPanel({
-            quotaRef: this.quota,
-            onClose: () => { this.showParent = false; },
-            onChanged: () => { this.applyQuota(); }
-          })
+          Column() {
+            ParentPanel({
+              quotaRef: this.quota,
+              onClose: () => { this.showParent = false; },
+              onChanged: () => { this.applyQuota(); }
+            })
+          }
+          .width('100%')
+          // 面板自己吃掉点击，只有点面板外的暗色区域才关闭
+          .hitTestBehavior(HitTestMode.Block)
         }
         .width('100%').height('100%')
         .justifyContent(FlexAlign.End)

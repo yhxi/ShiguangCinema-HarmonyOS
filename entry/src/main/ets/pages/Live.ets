@@ -273,6 +273,7 @@ struct Live {
   }
 
   build() {
+    Stack() {
     Column() {
       Row({ space: 10 }) {
         Text('▶').fontSize(12).fontColor(Theme.ON_ACCENT)
@@ -382,11 +383,22 @@ struct Live {
     }
     .width('100%').height('100%')
     .backgroundColor(Theme.BG)
-    .bindSheet(this.showPaste, this.pasteSheet(), {
-      height: 420,
-      dragBar: true,
-      onDisappear: () => { this.showPaste = false; }
-    })
+
+    if (this.showPaste) {
+      Column() {
+        Blank()
+        // 浮层自己吃掉点击，避免点面板空白就把面板关掉
+        Column() { this.pasteSheet() }
+          .width('100%').borderRadius(20)
+          .backgroundColor(Theme.PANEL)
+          .hitTestBehavior(HitTestMode.Block)
+      }
+      .width('100%').height('100%')
+      .justifyContent(FlexAlign.End)
+      .backgroundColor('#66000000')
+    }
+    }
+    .width('100%').height('100%')
   }
 
   @Builder
