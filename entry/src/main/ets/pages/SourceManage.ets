@@ -22,6 +22,7 @@ import { BUILT_IN_LIVE_SOURCES, liveSourceLabel } from '../api/Api';
 import { Prefs } from '../store/Prefs';
 import { Session } from '../store/Session';
 import { HealthRecord, SourceHealth } from '../store/SourceHealth';
+import { parseSourceLines } from '../common/SourceText';
 import { Theme } from '../common/Theme';
 
 const TEST_CONCURRENCY = 6;
@@ -66,6 +67,8 @@ struct SourceManage {
   @State subUrl: string = '';
   @State showLiveDialog: boolean = false;
   @State liveUrl: string = '';
+  @State showImportDialog: boolean = false;
+  @State importText: string = '';
 
   private session: Session = Session.getInstance();
   private prefs: Prefs | null = null;
@@ -411,6 +414,60 @@ struct SourceManage {
     this.msg = `已恢复 ${adding.length} 个内置源，共 ${this.sources.length} 个`;
   }
 
+  /** 批量导入：支持「名称,网址」多行，或只贴一个网址 */
+  private async importSources(): Promise<void> {
+    const parsed = parseSourceLines(this.importText);
+    if (parsed.length === 0) {
+      this.msg = '没有识别到有效源；每行「名称,网址」，或直接贴一个网址';
+      return;
+    }
+    const existing: Set<string> = new Set();
+    for (const src of this.sources) {
+      existing.add(src.url.replace(/\/+$/, ''));
+    }
+    const adding: SourceConfig[] = [];
+    for (const p of parsed) {
+      const key = p.url.replace(/\/+$/, '');
+      if (!existing.has(key)) {
+        existing.add(key);
+        const sc: SourceConfig = { name: p.name, url: p.url, detail: '', isAdult: false, enabled: true };
+        adding.push(sc);
+      }
+    }
+    if (adding.length === 0) {
+      this.msg = `识别到 ${parsed.length} 个源，但都已经存在`;
+      return;
+    }
+    this.sources = this.sources.concat(adding);
+    await this.persistSources();
+    this.importText = '';
+    this.showImportDialog = false;
+    this.msg = `新增 ${adding.length} 个源（跳过重复 ${parsed.length - adding.length}），共 ${this.sources.length} 个`;
+  }
+
+  /** 一键删除全部点播源；内置源可随时用「恢复内置源」找回 */
+  private async deleteAllSources(): Promise<void> {
+    if (this.sources.length === 0) {
+      this.msg = '没有可删除的源';
+      return;
+    }
+    const result = await promptAction.showDialog({
+      title: '删除全部片源',
+      message: `将删除全部 ${this.sources.length} 个点播源（含内置源）。删除后可点「恢复内置源」找回内置源。`,
+      buttons: [
+        { text: '取消', color: Theme.INK },
+        { text: '全部删除', color: Theme.DANGER }
+      ]
+    });
+    if (result.index !== 1) {
+      return;
+    }
+    const count = this.sources.length;
+    this.sources = [];
+    await this.persistSources();
+    this.msg = `已删除全部 ${count} 个源；需要时点「恢复内置源」找回内置源`;
+  }
+
   private async addCustomSource(): Promise<void> {
     const url = this.addUrl.trim();
     if (url === '' || !url.startsWith('http')) {
@@ -576,6 +633,30 @@ struct SourceManage {
   }
 
   @Builder
+  importSourceDialog() {
+    Column({ space: 12 }) {
+      Text('粘贴导入片源').fontSize(16).fontWeight(FontWeight.Bold).fontColor(Theme.INK)
+      Text('每行一个源，格式「名称,网址」；只贴网址也行，名称自动取域名。空行和 # 开头的注释会被忽略。')
+        .fontSize(12).fontColor(Theme.SECONDARY)
+      TextArea({ placeholder: '虎牙,https://www.huyaapi.com/api.php/provide/vod/from/hym3u8\n火狐,https://hhzyapi.com/api.php/provide/vod\nhttps://cj.lziapi.com/api.php/provide/vod',
+        text: this.importText })
+        .fontSize(13).height(190).borderRadius(12)
+        .backgroundColor(Theme.BG).fontColor(Theme.INK).placeholderColor(Theme.SECONDARY)
+        .onChange((v: string) => { this.importText = v; })
+      Row({ space: 10 }) {
+        Button('取消').fontSize(14).height(42).borderRadius(12)
+          .backgroundColor(Theme.TINT).fontColor(Theme.INK).layoutWeight(1)
+          .onClick(() => { this.showImportDialog = false; })
+        Button('导入').fontSize(14).height(42).borderRadius(12)
+          .backgroundColor(Theme.ACCENT).fontColor(Theme.ON_ACCENT).layoutWeight(1)
+          .onClick(() => { this.importSources(); })
+      }.width('100%')
+    }
+    .padding(18).borderRadius(Theme.RADIUS_CARD).backgroundColor(Theme.PANEL).width('86%')
+    .border({ width: 1, color: Theme.BORDER })
+  }
+
+  @Builder
   chip(key: string, label: string) {
     Text(label).fontSize(12).height(30).padding({ left: 11, right: 11 })
       .borderRadius(15)
@@ -725,6 +806,16 @@ struct SourceManage {
               .onClick(() => { this.restoreBuiltIn(); })
           }.width('100%').padding({ left: 16, right: 16, bottom: 8 })
 
+          Row({ space: 8 }) {
+            Button('粘贴导入源').fontSize(12).height(34).borderRadius(11).layoutWeight(1)
+              .backgroundColor(Theme.TILE_SOFT).fontColor(Theme.TILE_ICON)
+              .onClick(() => { this.showImportDialog = true; })
+            Button('删除全部源').fontSize(12).height(34).borderRadius(11).layoutWeight(1)
+              .backgroundColor(Theme.PANEL).fontColor(Theme.DANGER)
+              .enabled(this.sources.length > 0)
+              .onClick(() => { this.deleteAllSources(); })
+          }.width('100%').padding({ left: 16, right: 16, bottom: 8 })
+
           if (this.msg !== '') {
             Text(this.msg).fontSize(11).fontColor(Theme.SECONDARY)
               .width('100%').padding({ left: 16, right: 16, bottom: 6 })
@@ -810,6 +901,11 @@ struct SourceManage {
       }
       if (this.showLiveDialog) {
         Column() { this.addLiveDialog() }
+          .width('100%').height('100%').justifyContent(FlexAlign.Center)
+          .backgroundColor('#66000000')
+      }
+      if (this.showImportDialog) {
+        Column() { this.importSourceDialog() }
           .width('100%').height('100%').justifyContent(FlexAlign.Center)
           .backgroundColor('#66000000')
       }

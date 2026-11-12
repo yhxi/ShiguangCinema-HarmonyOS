@@ -13,6 +13,7 @@
     "pages/NetDiag",
     "pages/PlaybackSettings",
     "pages/Settings",
-    "pages/Children"
+    "pages/Children",
+    "pages/MemInfo"
   ]
 }

@@ -536,7 +536,8 @@ struct Index {
   }
 
   private goLive(): void {
-    router.pushUrl({ url: 'pages/Live' });
+    // 首页点直播：频道列表就绪后直接播 CCTV1，不用再点一次
+    router.pushUrl({ url: 'pages/Live', params: { autoPlay: '1' } as RouteParams });
   }
 
   private goFavorites(): void {

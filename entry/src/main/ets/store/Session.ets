@@ -18,6 +18,9 @@ const SEARCH_CACHE_MAX = 20;
 export class Session {
   private static instance: Session | null = null;
 
+  /** 应用本次启动的时间（单例首次创建 ≈ 冷启动），内存监控页用它算运行时长 */
+  readonly startedAt: number = Date.now();
+
   serverUrl: string = '';
   api: Api | null = null;
   appStatus: AppStatus | null = null;

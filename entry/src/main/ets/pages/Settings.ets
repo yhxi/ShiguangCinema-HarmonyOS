@@ -222,6 +222,8 @@ struct SettingsPage {
         this.card({ icon: '◷', title: '清理缓存', subtitle: '管理本地缓存占用', action: () => { this.clearCache(); } })
         this.card({ icon: '⌕', title: '网络诊断', subtitle: '检测连接和片源响应',
           action: () => { router.pushUrl({ url: 'pages/NetDiag' }); } })
+        this.card({ icon: '▦', title: '内存监控', subtitle: '实时查看本应用 PSS / 私有内存 / 堆占用',
+          action: () => { router.pushUrl({ url: 'pages/MemInfo' }); } })
         this.card({ icon: '↻', title: '检查更新', subtitle: '立即检查 GitHub 上的最新版本', action: () => { this.showUpdateInfo(); } })
         this.card({ icon: '◷', title: '崩溃日志', subtitle: '查看错误记录并复制排查', action: () => { this.showCrashInfo(); } })
 

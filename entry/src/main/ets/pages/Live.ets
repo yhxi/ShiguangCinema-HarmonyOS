@@ -16,7 +16,7 @@ import { Channel } from '../api/Models';
 import { Api, BUILT_IN_LIVE_SOURCES, liveSourceLabel } from '../api/Api';
 import { Prefs } from '../store/Prefs';
 import { LiveLocal } from '../store/LiveLocal';
-import { liveChannelKey, sortedLiveChannels } from '../api/LivePlaylist';
+import { liveChannelKey, isCctvOne, sortedLiveChannels, defaultLiveChannelIndex } from '../api/LivePlaylist';
 import { PinyinInitials } from '../api/PinyinInitials';
 import { matchesInitials } from '../common/TextClean';
 import { Theme } from '../common/Theme';
@@ -97,6 +97,8 @@ struct Live {
   @State favoriteCount: number = 0;
   /** 展开过的分组名（只影响界面，不影响上下台顺序） */
   @State expandedGroups: string[] = [];
+  /** 首页「直播」入口进来时，频道就绪后自动播 CCTV1；触发一次即清除 */
+  @State autoPlay: boolean = false;
 
   private session: Session = Session.getInstance();
   private prefs: Prefs | null = null;
@@ -118,11 +120,16 @@ struct Live {
   }
 
   aboutToAppear(): void {
+    const params = router.getParams() as Record<string, string>;
+    this.autoPlay = params !== undefined && params['autoPlay'] === '1';
     Prefs.get(getContext(this)).then(async (p: Prefs) => {
       this.prefs = p;
       this.favorites = LiveLocal.favorites(p);
       this.favoriteCount = this.favorites.size;
       await this.loadChannels();
+      if (this.autoPlay) {
+        this.autoPlayCctvOne();
+      }
     }).catch(() => {});
   }
 
@@ -360,7 +367,23 @@ struct Live {
     if (all.length === 0) {
       return;
     }
-    this.startPlayer(all, 0);
+    // 默认播 CCTV1，找不到就第一台（收藏置顶不改变定位逻辑）
+    const idx = defaultLiveChannelIndex(all);
+    this.startPlayer(all, idx);
+  }
+
+  /** 频道就绪后自动播 CCTV1；触发一次即清除，避免 onPageShow 重复播放 */
+  private autoPlayCctvOne(): void {
+    if (!this.autoPlay) {
+      return;
+    }
+    this.autoPlay = false;
+    const all = this.flatten();
+    if (all.length === 0) {
+      return;
+    }
+    const idx = defaultLiveChannelIndex(all);
+    this.startPlayer(all, idx);
   }
 
   private toggleFavorite(ch: Channel): void {

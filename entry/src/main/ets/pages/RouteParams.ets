@@ -19,4 +19,6 @@ export interface RouteParams {
   channelNames?: string;
   channelIndex?: string;
   channelHeaders?: string;
+  /** 首页「直播」入口进来：频道就绪后自动播 CCTV1 */
+  autoPlay?: string;
 }
