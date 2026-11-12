@@ -4,15 +4,17 @@
 [yhxi/ShiguangCinema-Android-TV](https://github.com/yhxi/ShiguangCinema-Android-TV)。
 
 连接 LibreTV 服务端后即可搜索、点播、看直播，本地保存观看历史与收藏。
-版本节奏与 Android 版同步：本包为 **1.5.5**，对应 Android TV v1.5.5 的功能面。
+版本节奏与 Android 版同步：本包为 **1.5.5.1**，在 Android TV v1.5.5 的功能面之上
+补齐了搜索分组/拼音首字母/选集缓存等差异项。
 
 ## 安装包
 
-仓库根目录的 `ShiguangCinema-HarmonyOS-v1.5.5-unsigned.hap` 是**未签名**构建，
+仓库根目录的 `ShiguangCinema-HarmonyOS-v1.5.5.1-unsigned.hap` 是**未签名**构建，
 需要自行签名后才能装到设备上（见下方「签名」）。
 
 - bundleName：`com.lshai.shiguangcinema`
-- versionName：`1.5.5` / versionCode：`10155`（规则：`major*10000 + minor*100 + patch`）
+- versionName：`1.5.5.1` / versionCode：`10156`
+  （规则：`major*10000 + minor*100 + patch`，第四段按增量递增）
 - deviceTypes：`phone`
 
 ## 功能
@@ -114,9 +116,9 @@ sign-hap.cmd
 
 ## 变更记录
 
-### v1.5.5 补充（对齐差异 + 性能）
+### v1.5.5.1（首个 1.5 系列发布版）
 
-对照 Android 源码逐模块复查后补齐的部分：
+在 v1.5.5 功能面之上，对照 Android 源码逐模块复查后补齐的差异与性能修补：
 
 - 搜索页重做：结果按片名分组（一部片一张卡 + 「N 个源」+ 卡内「换源」）、完全匹配置顶、
   增量结果保留原顺序、搜索历史（12 条）、拼音首字母联想、无结果时用清洗后的片名重试。
@@ -129,6 +131,7 @@ sign-hap.cmd
 - 搜索结果缓存从「只记一个关键词」升级为最近 20 个（换源、来回切关键词都能命中），
   空结果不写入缓存。
 - 直播频道过滤、选频道搜索也支持拼音首字母。
+- 版本号升到 `1.5.5.1`（versionCode `10156`），便于与已装 1.5.5 的机器区分。
 
 ### v1.5.5（对应 Android v1.3.0–v1.5.5 的功能面）
 
