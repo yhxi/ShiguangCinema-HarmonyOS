@@ -4,16 +4,16 @@
 [yhxi/ShiguangCinema-Android-TV](https://github.com/yhxi/ShiguangCinema-Android-TV)。
 
 连接 LibreTV 服务端后即可搜索、点播、看直播，本地保存观看历史与收藏。
-版本节奏与 Android 版同步：本包为 **1.5.5.1**，在 Android TV v1.5.5 的功能面之上
-补齐了搜索分组/拼音首字母/选集缓存等差异项。
+版本节奏与 Android 版同步：本包为 **1.5.5.2**，在 Android TV v1.5.5 的功能面之上
+补齐了搜索分组/拼音首字母/选集缓存等差异项，并新增片源批量导入、内存监控与直播默认播 CCTV1。
 
 ## 安装包
 
-仓库根目录的 `ShiguangCinema-HarmonyOS-v1.5.5.1-unsigned.hap` 是**未签名**构建，
+仓库根目录的 `ShiguangCinema-HarmonyOS-v1.5.5.2-unsigned.hap` 是**未签名**构建，
 需要自行签名后才能装到设备上（见下方「签名」）。
 
 - bundleName：`com.lshai.shiguangcinema`
-- versionName：`1.5.5.1` / versionCode：`10156`
+- versionName：`1.5.5.2` / versionCode：`10157`
   （规则：`major*10000 + minor*100 + patch`，第四段按增量递增）
 - deviceTypes：`phone`
 
@@ -115,6 +115,21 @@ sign-hap.cmd
 - 混合榜单的「部分榜单先显示」（v1.5.2）：鸿蒙侧仍是服务端一次返回后整体渲染。
 
 ## 变更记录
+
+### v1.5.5.2
+
+在 v1.5.5.1 之上补充的功能项：
+
+- 片源管理新增「粘贴导入源」：直接粘贴「名称,网址」清单（中英文逗号均可，支持
+  「地址,名称」倒序、裸网址按主机名兜底命名、按地址去重、名称超 24 字截断、跳过注释与非 http 行），
+  也接受单个网址；解析逻辑沉淀为纯函数 `common/SourceText.ets` 并配回归测试。
+- 片源管理新增「删除全部源」：二次确认后清空，并提示可「恢复内置源」。
+- 维护工具新增「内存监控」：实时显示本应用 PSS / RSS / 私有内存 / VSS / Native 堆 /
+  ArkTS 虚拟机堆 / 系统总与可用内存 / CPU，每秒刷新、支持暂停，记录本次观察 PSS 峰值
+  与运行时长（数据来自 `@ohos.hidebug`，读系统 `/proc` 节点）。
+- 首页点「直播」直接自动播放 CCTV1（找不到则播第一台），收藏置顶不影响定位；
+  直播页「立即播放 CCTV1」按钮同样按 CCTV1 定位。
+- 版本号升到 `1.5.5.2`（versionCode `10157`）。
 
 ### v1.5.5.1（首个 1.5 系列发布版）
 
