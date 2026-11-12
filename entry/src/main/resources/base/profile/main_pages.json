@@ -6,11 +6,13 @@
     "pages/Player",
     "pages/History",
     "pages/Live",
+    "pages/LivePlayer",
     "pages/SourceManage",
     "pages/Scan",
     "pages/Favorites",
     "pages/NetDiag",
     "pages/PlaybackSettings",
-    "pages/Settings"
+    "pages/Settings",
+    "pages/Children"
   ]
 }

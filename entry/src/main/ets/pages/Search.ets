@@ -16,6 +16,8 @@ struct SearchPage {
   @State searching: boolean = false;
   @State statusMsg: string = '';
   @State items: SearchItem[] = [];
+  /** 来源：fromChildren 从儿童乐园来 / fromPlayer 是播放页换源 */
+  @State origin: string = '';
 
   private session: Session = Session.getInstance();
   private searchGeneration: number = 0;
@@ -24,6 +26,11 @@ struct SearchPage {
 
   aboutToAppear(): void {
     const params = router.getParams() as Record<string, string> | undefined;
+    if (params !== undefined && params['fromChildren'] === '1') {
+      this.origin = 'children';
+    } else if (params !== undefined && params['fromPlayer'] === '1') {
+      this.origin = 'player';
+    }
     if (params !== undefined && params['keyword'] !== undefined) {
       this.keyword = params['keyword'];
       this.doSearch();
@@ -122,10 +129,19 @@ struct SearchPage {
           .borderRadius(8).backgroundColor(Theme.ACCENT)
         Text('时光影院').fontSize(16).fontWeight(FontWeight.Bold).fontColor(Theme.INK)
         Blank()
-        Button('‹ 返回').fontSize(13).height(34).borderRadius(17)
-          .backgroundColor(Theme.PANEL).fontColor(Theme.INK)
+        Button(this.origin === 'children' ? '‹ 儿童乐园' : '‹ 返回').fontSize(13).height(34).borderRadius(17)
+          .backgroundColor(this.origin === 'children' ? Theme.KID_TINT : Theme.PANEL)
+          .fontColor(this.origin === 'children' ? Theme.KID_ACCENT_DEEP : Theme.INK)
           .onClick(() => { router.back(); })
       }.width('100%').padding({ left: 16, right: 16, top: 8, bottom: 8 })
+
+      if (this.origin !== '') {
+        Text(this.origin === 'children'
+          ? '儿童乐园 · 从下面挑一个能播的片源，播放时间会记入今天的儿童额度'
+          : '换源 · 同一个片名换个片源再试，进度会从上次的位置继续')
+          .fontSize(11).fontColor(Theme.SECONDARY)
+          .width('100%').padding({ left: 16, right: 16, bottom: 8 })
+      }
 
       Row({ space: 10 }) {
         TextInput({ placeholder: '搜索片名、演员…', text: this.keyword })

@@ -61,6 +61,12 @@ export function iconStrokePath(kind: string, size: number): string {
     // 屏幕 + 里面一个实心小三角
     return roundRect(3.5, 5, 17, 14, 2.6, size);
   }
+  if (kind === 'kids') {
+    // 笑脸：外圈 + 两点眼睛（实心部分）+ 下弯的嘴（对齐 Android HomeIcons 的 kids）
+    return circle(12, 12, 8, size) + ' ' +
+      `M ${scale(15.76, size)} ${scale(14.03, size)} ` +
+      `A ${scale(4, size)} ${scale(3, size)} 0 0 1 ${scale(8.24, size)} ${scale(14.03, size)}`;
+  }
   if (kind === 'live') {
     // 同心圆：外圈描边，内点实心
     return circle(12, 12, 8, size);
@@ -109,6 +115,9 @@ export function iconStrokePath(kind: string, size: number): string {
 export function iconFillPath(kind: string, size: number): string {
   if (kind === 'tv') {
     return triangle(10, 9, 15.5, 12, 10, 15, size);
+  }
+  if (kind === 'kids') {
+    return circle(9, 10, 0.9, size) + ' ' + circle(15, 10, 0.9, size);
   }
   if (kind === 'live') {
     return circle(12, 12, 2.8, size);

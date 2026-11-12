@@ -10,6 +10,7 @@ import { Api } from '../api/Api';
 import { DoubanItem } from '../api/Models';
 import { Prefs, WatchEntry, UpdateState } from '../store/Prefs';
 import { Session } from '../store/Session';
+import { ChildrenQuota } from '../store/ChildrenQuota';
 import { Credentials } from '../store/Credentials';
 import { DEFAULT_SERVER_URL } from '../store/DefaultServer';
 import { checkUpdate, isNewerVersion, releasesPageUrl, ReleaseInfo } from '../api/UpdateChecker';
@@ -52,11 +53,17 @@ struct Index {
   @State recommendTag: string = '';
   @State recommendError: string = '';
   @State recommendLoading: boolean = false;
+  /** 儿童入口的额度提示（v1.3.0 起首页直接显示剩余时间） */
+  @State kidLabel: string = '';
+  @State kidExhausted: boolean = false;
 
   private session: Session = Session.getInstance();
   private prefs: Prefs | null = null;
   private retryTimer: number = -1;
   private retryCount: number = 0;
+  /** 推荐加载失败后的静默重试（v1.5.1：保留已显示内容，间隔逐步拉长） */
+  private recommendRetryTimer: number = -1;
+  private recommendRetryCount: number = 0;
   private connectionAttempt: number = 0;
   private disposed: boolean = false;
   private homeWindow: window.Window | null = null;
@@ -123,11 +130,30 @@ struct Index {
 
   aboutToDisappear(): void {
     this.disposed = true;
+    this.stopRecommendRetry();
     if (this.homeWindow !== null) {
       this.homeWindow.setSpecificSystemBarEnabled('navigationIndicator', true).catch(() => {});
     }
     this.stopRetry();
     this.session.invalidateConnection();
+  }
+
+  private stopRecommendRetry(): void {
+    if (this.recommendRetryTimer >= 0) { clearTimeout(this.recommendRetryTimer); this.recommendRetryTimer = -1; }
+  }
+
+  /** 失败后不打扰用户，按 5s/15s/45s/120s 静默再试；已经显示了内容就只更新不闪 */
+  private scheduleRecommendRetry(): void {
+    if (this.disposed) { return; }
+    const delays: number[] = [5000, 15000, 45000, 120000];
+    if (this.recommendRetryCount >= delays.length) { return; }
+    const delay = delays[this.recommendRetryCount];
+    this.recommendRetryCount++;
+    this.stopRecommendRetry();
+    this.recommendRetryTimer = setTimeout(() => {
+      this.recommendRetryTimer = -1;
+      if (!this.disposed) { this.loadDouban(true, true); }
+    }, delay);
   }
 
   private stopRetry(): void {
@@ -250,11 +276,63 @@ struct Index {
       return;
     }
     this.prefs.getHistory().then((list: WatchEntry[]) => {
-      this.recent = list.slice(0, 12);
+      // v1.3.20：最近观看最多 20 条，手机横向滑动浏览
+      this.recent = list.slice(0, 20);
     });
+    this.refreshKidLabel();
   }
 
-  private async loadDouban(refresh: boolean = true): Promise<void> {
+  /** 首页儿童入口显示「今日剩余 N 分钟」，用完置灰（仍可进入看家长加时说明） */
+  private refreshKidLabel(): void {
+    if (this.prefs === null) {
+      return;
+    }
+    ChildrenQuota.get(this.prefs).then((quota: ChildrenQuota) => {
+      this.kidLabel = quota.label();
+      this.kidExhausted = quota.isExhausted();
+    }).catch(() => {});
+  }
+
+  /** 第 N 集 · 已看 X%；不足 1% 说「刚开始看」，时长未知退回已播时间（v1.3.13/v1.3.14） */
+  private recentLabel(entry: WatchEntry): string {
+    const ep = `第 ${entry.episodeIndex + 1} 集`;
+    if (entry.durationMs <= 0) {
+      return entry.positionMs > 0 ? `${ep} · 已看 ${this.shortTime(entry.positionMs)}` : ep;
+    }
+    const ratio = Math.max(0, Math.min(1, entry.positionMs / entry.durationMs));
+    // 向下取整，避免没看完就显示 100%
+    const pct = Math.floor(ratio * 100);
+    if (pct <= 0) {
+      return entry.positionMs > 1000 ? `${ep} · 刚开始看` : ep;
+    }
+    return `${ep} · 已看 ${pct}%`;
+  }
+
+  private recentPercent(entry: WatchEntry): number {
+    if (entry.durationMs <= 0) {
+      return 0;
+    }
+    return Math.max(0, Math.min(100, entry.positionMs / entry.durationMs * 100));
+  }
+
+  private shortTime(ms: number): string {
+    const totalSec = Math.floor(ms / 1000);
+    const h = Math.floor(totalSec / 3600);
+    const m = Math.floor((totalSec % 3600) / 60);
+    if (h > 0) {
+      return `${h} 小时 ${m} 分`;
+    }
+    return `${Math.max(1, m)} 分钟`;
+  }
+
+  private openRecent(entry: WatchEntry): void {
+    const params: RouteParams = {
+      sourceUrl: entry.sourceUrl, vodId: entry.vodId, resumeKey: entry.key
+    } as RouteParams;
+    router.pushUrl({ url: 'pages/Detail', params: params });
+  }
+
+  private async loadDouban(refresh: boolean = true, silentRetry: boolean = false): Promise<void> {
     const api = this.session.api;
     if (api === null) { return; }
     const type = this.recommendType;
@@ -271,36 +349,44 @@ struct Index {
       }
     }
     if (!refresh) { return; }
-    this.recommendLoading = true;
-    this.recommendError = '';
+    if (!silentRetry) {
+      this.recommendLoading = true;
+      this.recommendError = '';
+    }
     api.douban(type, tag, 0, 24).then((list: DoubanItem[]) => {
       if (type !== this.recommendType || tag !== this.recommendTag) { return; }
       if (list.length > 0) { this.doubanList = list; }
       this.recommendLoading = false;
+      this.recommendRetryCount = 0;
       if (list.length > 0 && this.prefs !== null) {
         this.prefs.setRecommendations(serverUrl, cacheKey, list).catch(() => {});
       }
-      if (list.length === 0 && this.doubanList.length === 0) { this.recommendError = '暂无推荐，点击重试'; }
+      if (list.length === 0 && this.doubanList.length === 0) {
+        this.recommendError = '暂无推荐，点击重试';
+        this.scheduleRecommendRetry();
+      }
     }).catch(() => {
       if (type !== this.recommendType || tag !== this.recommendTag) { return; }
       this.recommendLoading = false;
+      // 有内容就静默保底，不弹错误、不闪；完全空才提示，同时后台继续重试
       if (this.doubanList.length === 0) { this.recommendError = '推荐加载失败，点击重试'; }
+      this.scheduleRecommendRetry();
     });
   }
 
-  /** 入口格子按设计稿比例换算：5 格 + 4 个 7vp 间隙，左右各 20vp 页边距，宽高比 0.9 */
+  /** 入口格子按设计稿比例换算：6 格 + 5 个 6vp 间隙，左右各 20vp 页边距，宽高比 0.9 */
   private computeTileMetrics(): void {
     try {
       const screenWidth: number = px2vp(display.getDefaultDisplaySync().width);
-      const tileWidth: number = (screenWidth - 40 - 4 * 7) / 5;
+      const tileWidth: number = (screenWidth - 40 - 5 * 6) / 6;
       this.tileHeight = Math.round(tileWidth / 0.9);
-      this.tileIconSize = Math.round(this.tileHeight * 0.23);
-      this.tileFontSize = Math.round(this.tileHeight * 0.20);
+      this.tileIconSize = Math.round(this.tileHeight * 0.25);
+      this.tileFontSize = Math.round(this.tileHeight * 0.21);
     } catch (e) {
       // 取不到屏宽就用 360vp 的默认值
-      this.tileHeight = 65;
-      this.tileIconSize = 15;
-      this.tileFontSize = 13;
+      this.tileHeight = 58;
+      this.tileIconSize = 14;
+      this.tileFontSize = 12;
     }
   }
 
@@ -310,6 +396,8 @@ struct Index {
     this.recommendType = type;
     this.doubanList = [];
     this.recommendError = '';
+    this.recommendRetryCount = 0;
+    this.stopRecommendRetry();
     this.loadDouban();
   }
 
@@ -330,6 +418,8 @@ struct Index {
     this.recommendTag = order[(idx < 0 ? 0 : idx + 1) % order.length];
     this.doubanList = [];
     this.recommendError = '';
+    this.recommendRetryCount = 0;
+    this.stopRecommendRetry();
     this.loadDouban();
   }
 
@@ -453,6 +543,10 @@ struct Index {
     router.pushUrl({ url: 'pages/Favorites' });
   }
 
+  private goChildren(): void {
+    router.pushUrl({ url: 'pages/Children' });
+  }
+
   private goSourceManage(): void {
     router.pushUrl({ url: 'pages/SourceManage' });
   }
@@ -465,15 +559,24 @@ struct Index {
     router.pushUrl({ url: 'pages/Scan', params: { mode: 'server' } as RouteParams });
   }
 
+  /**
+   * 首页入口格子（v1.5.5 手机：柔和浅绿底 + 深墨绿图标）。
+   * 儿童入口在额度用完时整体置灰，但仍可点进去看家长加时说明。
+   */
   @Builder
-  navTile(kind: string, label: string, selected: boolean, action: () => void) {
-    Column({ space: 6 }) {
-      HomeIcon({ kind: kind, iconSize: this.tileIconSize, tint: selected ? Theme.ON_ACCENT : Theme.INK })
-      Text(label).fontSize(this.tileFontSize).fontColor(selected ? Theme.ON_ACCENT : Theme.INK).maxLines(1)
+  navTile(kind: string, label: string, selected: boolean, action: () => void, dimmed: boolean = false) {
+    Column({ space: 5 }) {
+      HomeIcon({
+        kind: kind, iconSize: this.tileIconSize,
+        tint: selected ? Theme.ON_ACCENT : (dimmed ? Theme.KID_DISABLED : Theme.TILE_ICON)
+      })
+      Text(label).fontSize(this.tileFontSize).maxLines(1)
+        .fontColor(selected ? Theme.ON_ACCENT : (dimmed ? Theme.KID_DISABLED : Theme.TILE_ICON))
     }
     .layoutWeight(1).height(this.tileHeight).justifyContent(FlexAlign.Center)
     .borderRadius(Theme.RADIUS_TILE)
-    .backgroundColor(selected ? Theme.TILE_ACTIVE : Theme.PANEL)
+    .backgroundColor(selected ? Theme.TILE_ACTIVE : Theme.TILE_SOFT)
+    .border({ width: selected ? 0 : 1, color: Theme.TILE_SOFT_BORDER })
     .onClick(action)
   }
 
@@ -489,7 +592,7 @@ struct Index {
           .fill(Theme.ON_ACCENT)
           .antiAlias(true)
       }.width(28).height(28)
-      Text('时光影院').fontSize(23).fontWeight(FontWeight.Bold).fontColor(Theme.INK)
+      Text('时光影院').fontSize(23).fontWeight(FontWeight.Bold).fontColor(Theme.WALL_TITLE)
         .padding({ left: 10, right: 12 })
       Blank()
       if (this.updateTag !== '') {
@@ -577,12 +680,13 @@ struct Index {
       Column({ space: 18 }) {
         this.brandRow()
 
-        // 入口格子：一行五个（点播 / 直播 / 搜索 / 追剧 / 设置），与设计稿一致
-        Row({ space: 7 }) {
+        // 入口格子：一行六个（点播 / 儿童 / 直播 / 搜索 / 收藏 / 设置），v1.5.5 浅绿柔和配色
+        Row({ space: 6 }) {
           this.navTile('tv', '点播', this.recommendType === 'tv', () => { this.setMediaType('tv'); })
+          this.navTile('kids', '儿童', false, () => { this.goChildren(); }, this.kidExhausted)
           this.navTile('live', '直播', false, () => { this.goLive(); })
           this.navTile('search', '搜索', false, () => { this.goSearch(); })
-          this.navTile('fav', '追剧', false, () => { this.goFavorites(); })
+          this.navTile('fav', '收藏', false, () => { this.goFavorites(); })
           this.navTile('setup', '设置', false, () => { router.pushUrl({ url: 'pages/Settings' }); })
         }.width('100%')
 
@@ -594,36 +698,46 @@ struct Index {
 
         if (this.recent.length > 0) {
           Row() {
-            Text('最近观看').fontSize(21).fontWeight(FontWeight.Bold).fontColor(Theme.INK).layoutWeight(1)
-            Button('全部记录').fontSize(13).height(34).borderRadius(17)
-              .backgroundColor(Theme.PANEL).fontColor(Theme.INK)
+            Text('最近观看').fontSize(21).fontWeight(FontWeight.Bold).fontColor(Theme.WALL_TITLE).layoutWeight(1)
+            if (this.recent.length > 1) {
+              Text('左右滑动').fontSize(11).fontColor(Theme.TERTIARY)
+            }
+            Button('全部历史').fontSize(13).height(34).borderRadius(17).margin({ left: 8 })
+              .backgroundColor(Theme.TILE_SOFT).fontColor(Theme.TILE_ICON)
               .onClick(() => { this.goHistory(); })
           }.width('100%')
-          Row() {
-            PosterImage({ url: this.recent[0].cover,
-              proxy: this.session.api !== null ? this.session.api.imageUrl(this.recent[0].cover) : '',
-              cookie: this.session.api !== null ? this.session.api.currentCookie() : '', posterHeight: 176 }).width(118)
-            Column({ space: 8 }) {
-              Text('继续观看').fontSize(12).fontWeight(FontWeight.Bold).fontColor(Theme.ACCENT)
-              Text(this.recent[0].title).fontSize(19).fontWeight(FontWeight.Bold).fontColor(Theme.INK).maxLines(2)
-              Text(`第 ${this.recent[0].episodeIndex + 1}/${this.recent[0].episodeCount} 集`)
-                .fontSize(12).fontColor(Theme.SECONDARY)
-              Progress({ value: this.recent[0].durationMs > 0 ? this.recent[0].positionMs / this.recent[0].durationMs * 100 : 0, total: 100 })
-                .width('100%').height(4).color(Theme.ACCENT)
-              Text('▶ 继续播放').fontSize(13).fontWeight(FontWeight.Bold).fontColor(Theme.ACCENT)
-            }.alignItems(HorizontalAlign.Start).layoutWeight(1).padding(16)
+
+          // v1.3.20：最近观看横向浏览最多 20 条，点击续播
+          Scroll() {
+            Row({ space: 12 }) {
+              ForEach(this.recent, (entry: WatchEntry) => {
+                Column({ space: 6 }) {
+                  Stack({ alignContent: Alignment.Bottom }) {
+                    PosterImage({ url: entry.cover,
+                      proxy: this.proxyImg(entry.cover),
+                      cookie: this.session.api !== null ? this.session.api.currentCookie() : '',
+                      posterHeight: 168 })
+                    Progress({ value: this.recentPercent(entry), total: 100 })
+                      .width('100%').height(3).color(Theme.ACCENT)
+                      .backgroundColor('#33000000')
+                  }.width('100%').height(168)
+                  Text(entry.title).fontSize(14).fontWeight(FontWeight.Medium).fontColor(Theme.WALL_TITLE)
+                    .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%')
+                  Text(this.recentLabel(entry)).fontSize(11).fontColor(Theme.SECONDARY)
+                    .maxLines(1).width('100%')
+                }
+                .width(112)
+                .onClick(() => { this.openRecent(entry); })
+              }, (entry: WatchEntry) => entry.key + entry.updatedAt.toString())
+            }.padding({ right: 8 })
           }
-          .width('100%').height(176).borderRadius(18).clip(true)
-          .backgroundColor(Theme.PANEL)
-          .border({ width: 1, color: Theme.BORDER })
-          .onClick(() => {
-            const e = this.recent[0];
-            router.pushUrl({ url: 'pages/Detail', params: { sourceUrl: e.sourceUrl, vodId: e.vodId, resumeKey: e.key } as RouteParams });
-          })
+          .scrollable(ScrollDirection.Horizontal)
+          .scrollBar(BarState.Off)
+          .width('100%')
         }
 
         Row({ space: 8 }) {
-          Text('最新热门推荐').fontSize(21).fontWeight(FontWeight.Bold).fontColor(Theme.INK).layoutWeight(1)
+          Text('最新热门推荐').fontSize(21).fontWeight(FontWeight.Bold).fontColor(Theme.WALL_TITLE).layoutWeight(1)
           Button(this.mediaTypeLabel()).fontSize(12).height(32).borderRadius(16)
             .backgroundColor(Theme.PANEL).fontColor(Theme.INK)
             .onClick(() => {
@@ -647,7 +761,7 @@ struct Index {
               Column({ space: 5 }) {
                 PosterImage({ url: d.cover, proxy: this.session.api !== null ? this.session.api.imageUrl(d.cover) : '',
                   cookie: this.session.api !== null ? this.session.api.currentCookie() : '', posterHeight: 240 })
-                Text(d.title).fontSize(16).fontWeight(FontWeight.Bold).fontColor(Theme.INK)
+                Text(d.title).fontSize(16).fontWeight(FontWeight.Bold).fontColor(Theme.WALL_TITLE)
                   .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%')
                 Text(d.rating !== '' ? `★ ${d.rating} · 热播` : '热门').fontSize(12).fontColor(Theme.SECONDARY).width('100%')
               }.width('100%').padding({ bottom: 12 })
@@ -659,14 +773,14 @@ struct Index {
       .width('100%').padding({ left: 20, right: 20, top: 14, bottom: 30 })
       .alignItems(HorizontalAlign.Start)
       .constraintSize({ minHeight: '100%' })
-    }.width('100%').height('100%').scrollBar(BarState.Off).backgroundColor(Theme.BG)
+    }.width('100%').height('100%').scrollBar(BarState.Off).backgroundColor(Theme.WALL_BG)
   }
 
   build() {
     Stack() {
       Column()
         .width('100%').height('100%')
-        .backgroundColor(Theme.BG)
+        .backgroundColor(Theme.WALL_BG)
 
       if (this.connected) {
         this.homeView()

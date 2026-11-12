@@ -67,7 +67,7 @@ struct History {
         Text('▶').fontSize(12).fontColor(Theme.ON_ACCENT)
           .width(26).height(26).textAlign(TextAlign.Center)
           .borderRadius(8).backgroundColor(Theme.ACCENT)
-        Text('观看历史').fontSize(16).fontWeight(FontWeight.Bold).fontColor(Theme.INK)
+        Text('全部历史').fontSize(16).fontWeight(FontWeight.Bold).fontColor(Theme.INK)
         Blank()
         Button('清空').fontSize(13).height(34).borderRadius(17)
           .backgroundColor(Theme.PANEL).fontColor(Theme.DANGER)

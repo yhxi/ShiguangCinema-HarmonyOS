@@ -11,6 +11,7 @@ interface GraveyardItem {
 interface DiskFileInfo {
   name: string;
   mtime: number;
+  size: number;
 }
 
 const PACK_OPTIONS: image.PackingOption = { format: 'image/jpeg', quality: 82 };
@@ -33,7 +34,11 @@ class PosterCache {
   private static diskBroken: boolean = false;
   private static diskWrites: number = 0;
   private static readonly MEMORY_LIMIT: number = 48;
-  private static readonly DISK_LIMIT: number = 300;
+  /** 张数兜底：单张海报通常几十 KB，200 MB 大约能放两三千张，这里再压一道防异常 */
+  private static readonly DISK_LIMIT: number = 3000;
+  /** 磁盘上限 200 MB（v1.3.19 起按字节算，不再只按张数） */
+  private static readonly DISK_BYTES_LIMIT: number = 200 * 1024 * 1024;
+  private static readonly DISK_BYTES_TRIM_TO: number = 190 * 1024 * 1024;
   private static readonly GRAVEYARD_MS: number = 120000;
 
   static clear(): void {
@@ -181,24 +186,32 @@ class PosterCache {
       .catch(() => {});
   }
 
-  /** 磁盘超过上限时按修改时间删最旧的 */
+  /** 磁盘超过 200 MB（或张数兜底）时按修改时间删最旧的，留 10 MB 余量避免每次写都触发 */
   private static trimDisk(): void {
     try {
       const names: string[] = fs.listFileSync(PosterCache.diskDir);
-      if (names.length <= PosterCache.DISK_LIMIT) { return; }
+      if (names.length === 0) { return; }
       const stats: DiskFileInfo[] = [];
+      let total = 0;
       for (const name of names) {
         try {
           const st = fs.statSync(`${PosterCache.diskDir}/${name}`);
-          const info: DiskFileInfo = { name: name, mtime: st.mtime };
+          const size = st.size > 0 ? st.size : 0;
+          total += size;
+          const info: DiskFileInfo = { name: name, mtime: st.mtime, size: size };
           stats.push(info);
         } catch (e) { /* File vanished. */ }
       }
+      if (stats.length <= PosterCache.DISK_LIMIT && total <= PosterCache.DISK_BYTES_LIMIT) { return; }
       stats.sort((a: DiskFileInfo, b: DiskFileInfo) => a.mtime - b.mtime);
-      let excess = stats.length - PosterCache.DISK_LIMIT + 30;
+      let count = stats.length;
       for (const item of stats) {
-        if (excess <= 0) { break; }
-        try { fs.unlinkSync(`${PosterCache.diskDir}/${item.name}`); excess--; } catch (e) { /* Already gone. */ }
+        if (count <= PosterCache.DISK_LIMIT && total <= PosterCache.DISK_BYTES_TRIM_TO) { break; }
+        try {
+          fs.unlinkSync(`${PosterCache.diskDir}/${item.name}`);
+          total -= item.size;
+          count--;
+        } catch (e) { /* Already gone. */ }
       }
     } catch (e) { /* 目录读不到就算了 */ }
   }

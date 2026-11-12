@@ -4,11 +4,12 @@ import { RouteParams } from './RouteParams';
  * 视觉对齐 Android 版 showDetail：浅色底 + 白色卡片 + 深墨绿主色。
  */
 
-import { router } from '@kit.ArkUI';
+import { promptAction, router } from '@kit.ArkUI';
 import { Api } from '../api/Api';
 import { Detail, SourceConfig } from '../api/Models';
 import { Prefs, WatchEntry, watchKey } from '../store/Prefs';
 import { Session } from '../store/Session';
+import { ChildrenQuota } from '../store/ChildrenQuota';
 import { Theme } from '../common/Theme';
 
 @Entry
@@ -25,6 +26,9 @@ struct DetailPage {
   @State isFav: boolean = false;
   @State favBusy: boolean = false;
   @State sourceName: string = '';
+  /** 该片是否已纳入儿童每日额度（v1.3.7/v1.3.8：详情页提供加入入口） */
+  @State kidManaged: boolean = false;
+  @State kidLabel: string = '';
 
   private session: Session = Session.getInstance();
   private sourceUrl: string = '';
@@ -65,6 +69,29 @@ struct DetailPage {
       }
       this.loadDetail();
     });
+  }
+
+  /** 标题拿到之后才知道这片归不归儿童额度管 */
+  private async refreshKidState(): Promise<void> {
+    const p = this.prefs;
+    if (p === null || this.info['title'] === '') {
+      return;
+    }
+    const quota = await ChildrenQuota.get(p);
+    this.kidManaged = quota.isManaged(this.info['title']);
+    this.kidLabel = quota.label();
+  }
+
+  private async addToKidQuota(): Promise<void> {
+    const p = this.prefs;
+    if (p === null) {
+      return;
+    }
+    const quota = await ChildrenQuota.get(p);
+    await quota.mark(this.info['title']);
+    this.kidManaged = true;
+    this.kidLabel = quota.label();
+    promptAction.showToast({ message: `已加入儿童计时，${quota.label()}` });
   }
 
   private findSource(): SourceConfig | null {
@@ -124,6 +151,8 @@ struct DetailPage {
       this.lastWatch.episodeIndex < d.episodes.length) {
       this.selected = this.lastWatch.episodeIndex;
     }
+    // 片名以详情为准，拿到后再判断是否受儿童额度管理
+    this.refreshKidState().catch(() => {});
   }
 
   private proxyImg(picUrl: string): string {
@@ -251,13 +280,24 @@ struct DetailPage {
                       .backgroundColor(Theme.ACCENT).fontColor(Theme.ON_ACCENT)
                       .onClick(() => { this.playAt(this.lastWatch !== null ? this.lastWatch.episodeIndex : 0); })
                   }
-                  Button(this.isFav ? '✓ 已追剧' : '＋ 加入追剧')
+                  Button(this.isFav ? '✓ 已收藏' : '＋ 收藏')
                     .fontSize(13).height(34).borderRadius(17)
                     .backgroundColor(this.isFav ? Theme.TINT : Theme.PANEL)
                     .fontColor(Theme.ACCENT)
                     .enabled(!this.favBusy)
                     .onClick(() => { this.toggleFav(); })
                 }.width('100%').padding({ top: 4 })
+                Row({ space: 8 }) {
+                  if (this.kidManaged) {
+                    Text(`儿童计时 · ${this.kidLabel}`).fontSize(11).fontColor(Theme.KID_ACCENT_DEEP)
+                      .padding({ left: 10, right: 10, top: 6, bottom: 6 })
+                      .borderRadius(11).backgroundColor(Theme.KID_TINT)
+                  } else {
+                    Button('＋ 加入儿童计时').fontSize(11).height(30).borderRadius(15)
+                      .backgroundColor(Theme.KID_TINT).fontColor(Theme.KID_ACCENT_DEEP)
+                      .onClick(() => { this.addToKidQuota(); })
+                  }
+                }.width('100%').padding({ top: 2 })
               }
               .alignItems(HorizontalAlign.Start)
               .layoutWeight(1)

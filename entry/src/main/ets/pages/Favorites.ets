@@ -1,6 +1,6 @@
 import { RouteParams } from './RouteParams';
 /**
- * 追剧页 —— 收藏的剧集，点击进详情续播。
+ * 收藏页 —— 收藏的剧集，点击进详情续播（v1.3.20 起「追剧」统一叫「收藏」）。
  */
 
 import { router } from '@kit.ArkUI';
@@ -87,7 +87,7 @@ struct Favorites {
         Text('▶').fontSize(12).fontColor(Theme.ON_ACCENT)
           .width(26).height(26).textAlign(TextAlign.Center)
           .borderRadius(8).backgroundColor(Theme.ACCENT)
-        Text('追剧').fontSize(16).fontWeight(FontWeight.Bold).fontColor(Theme.INK)
+        Text('收藏').fontSize(16).fontWeight(FontWeight.Bold).fontColor(Theme.INK)
         Blank()
         Button(this.checking ? '检查中…' : '检查更新').fontSize(13).height(34).borderRadius(17)
           .backgroundColor(Theme.PANEL).fontColor(Theme.ACCENT)
@@ -105,7 +105,7 @@ struct Favorites {
       if (this.list.length === 0) {
         Column({ space: 6 }) {
           Text('还没有收藏的剧集').fontSize(14).fontColor(Theme.SECONDARY)
-          Text('在详情页点「＋ 加入追剧」即可收藏').fontSize(13).fontColor(Theme.TERTIARY)
+          Text('在详情页点「＋ 收藏」即可加入收藏').fontSize(13).fontColor(Theme.TERTIARY)
         }.layoutWeight(1).justifyContent(FlexAlign.Center).width('100%')
       } else {
         List({ space: 9 }) {

@@ -4,6 +4,7 @@ import { bundleManager, common } from '@kit.AbilityKit';
 import { clearPosterCache } from '../components/PosterImage';
 import { Session } from '../store/Session';
 import { Prefs, UpdateState } from '../store/Prefs';
+import { ChildrenQuota } from '../store/ChildrenQuota';
 import { checkUpdate, isNewerVersion, releasesPageUrl, ReleaseInfo } from '../api/UpdateChecker';
 import { UpdateDialog } from '../components/UpdateDialog';
 import { Theme } from '../common/Theme';
@@ -23,6 +24,7 @@ struct SettingsPage {
   @State connected: boolean = false;
   @State serverName: string = '';
   @State versionLabel: string = '';
+  @State kidLabel: string = '';
   @State showUpdateDialog: boolean = false;
   @State newTag: string = '';
   @State newNotes: string = '';
@@ -52,6 +54,9 @@ struct SettingsPage {
       this.prefs = prefs;
       prefs.getLiveSources(this.session.serverUrl).then((sources: string[]) => {
         this.liveSourceCount = sources.length > 0 ? sources.length : (this.session.appStatus?.defaultLiveSources.length ?? 0);
+      }).catch(() => {});
+      ChildrenQuota.get(prefs).then((quota: ChildrenQuota) => {
+        this.kidLabel = quota.label();
       }).catch(() => {});
     }).catch(() => {});
   }
@@ -182,22 +187,17 @@ struct SettingsPage {
 
         Text('设置').fontSize(27).fontWeight(FontWeight.Bold).fontColor(Theme.INK).width('100%')
         Text('让观影体验保持顺手、稳定。').fontSize(15).fontColor(Theme.SECONDARY).width('100%')
-          .padding({ bottom: 8 })
+          .padding({ bottom: 4 })
+        Row({ space: 8 }) {
+          Text(this.connected ? '●' : '○').fontSize(11)
+            .fontColor(this.connected ? Theme.ACCENT : Theme.TERTIARY)
+          Text(this.serverName !== '' ? this.serverName : '未连接服务端').fontSize(12)
+            .fontColor(Theme.SECONDARY).layoutWeight(1).maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+          Text(`${this.pointSourceCount} 个片源`).fontSize(11).fontColor(Theme.TERTIARY)
+        }.width('100%').padding({ bottom: 10 })
 
-        Column({ space: 4 }) {
-          Text(this.connected ? '●  服务端已连接' : '●  服务端未连接').fontSize(13)
-            .fontWeight(FontWeight.Bold).fontColor(Theme.ON_ACCENT_SOFT)
-          Text(this.serverName !== '' ? this.serverName : '点击连接服务端').fontSize(17)
-            .fontWeight(FontWeight.Bold).fontColor(Theme.ON_ACCENT)
-            .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-            .padding({ top: 4, bottom: 3 })
-          Text(`${this.pointSourceCount} 个片源  ·  点击切换服务端`).fontSize(13)
-            .fontColor(Theme.ON_ACCENT_MUTED)
-        }.width('100%').padding({ left: 20, right: 20, top: 17, bottom: 17 })
-          .borderRadius(20).alignItems(HorizontalAlign.Start)
-          .linearGradient({ angle: 135, colors: [[Theme.ACCENT_START, 0.0], [Theme.ACCENT_DEEP, 1.0]] })
-          .onClick(() => { this.switchServer(); })
-
+        // v1.3.12 起设置页不再有顶部绿色连接状态大卡，服务端信息收进普通列表项
         Text('观影设置').fontSize(16).fontWeight(FontWeight.Bold).fontColor(Theme.INK)
           .width('100%').padding({ top: 22, bottom: 10 })
         this.card({ icon: '+', title: '片源管理',
@@ -207,6 +207,12 @@ struct SettingsPage {
           action: () => { router.pushUrl({ url: 'pages/PlaybackSettings' }); } })
         this.card({ icon: '☼', title: '切换服务端', subtitle: '选择预设服务端，输入密码连接',
           action: () => { this.switchServer(); } })
+        this.card({ icon: '⌂', title: '电视直播',
+          subtitle: `本地导入 / 备用线路 / 收藏频道 · ${this.liveSourceCount} 个源`,
+          action: () => { router.pushUrl({ url: 'pages/Live' }); } })
+        this.card({ icon: '☺', title: '儿童时间管理',
+          subtitle: `${this.kidLabel !== '' ? this.kidLabel : '每日额度、加时与受管理作品'}`,
+          action: () => { router.pushUrl({ url: 'pages/Children' }); } })
 
         Text('维护工具').fontSize(16).fontWeight(FontWeight.Bold).fontColor(Theme.INK)
           .width('100%').padding({ top: 22, bottom: 10 })

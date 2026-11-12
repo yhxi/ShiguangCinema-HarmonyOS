@@ -52,4 +52,38 @@ export class Theme {
   static readonly TILE_ACTIVE: string = '#34736E';
   /** 列表行圆角 */
   static readonly RADIUS_ROW: number = 12;
+
+  // ---------- v1.5.5 手机端「清新浅色海报墙」 ----------
+  /** 入口格子常态底色：柔和浅绿（替代原来的纯白） */
+  static readonly TILE_SOFT: string = '#EDF6EF';
+  /** 入口格子描边：比底色深一点点的浅绿 */
+  static readonly TILE_SOFT_BORDER: string = '#DDEBE1';
+  /** 入口图标常态色：深一档的墨绿，保证浅绿底上的对比度 */
+  static readonly TILE_ICON: string = '#2C574F';
+  /** 海报墙页面底色（比 BG 更干净的白绿） */
+  static readonly WALL_BG: string = '#FBFDFA';
+  /** 海报卡片标题区文字 */
+  static readonly WALL_TITLE: string = '#1F3A34';
+
+  // ---------- 儿童乐园（薄荷绿 + 奶油白） ----------
+  /** 儿童乐园主色 */
+  static readonly KID_ACCENT: string = '#3FA37B';
+  /** 儿童乐园主色深一档（文字/按钮按下） */
+  static readonly KID_ACCENT_DEEP: string = '#2F7F60';
+  /** 儿童乐园页面底色：奶油白 */
+  static readonly KID_BG: string = '#FFFDF6';
+  /** 儿童乐园卡片底色 */
+  static readonly KID_PANEL: string = '#FFFFFF';
+  /** 儿童乐园浅绿底 */
+  static readonly KID_TINT: string = '#E7F5EC';
+  /** 儿童乐园文字 */
+  static readonly KID_INK: string = '#2A4A3E';
+  /** 儿童乐园次级文字 */
+  static readonly KID_SECONDARY: string = '#6E8B7D';
+  /** 儿童乐园描边 */
+  static readonly KID_BORDER: string = '#E3EFE6';
+  /** 额度条已经用掉的部分 */
+  static readonly KID_BAR_USED: string = '#5CC08E';
+  /** 额度用完 / 置灰 */
+  static readonly KID_DISABLED: string = '#B9C7BE';
 }

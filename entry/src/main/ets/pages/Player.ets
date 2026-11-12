@@ -18,6 +18,7 @@ import { wantAgent } from '@kit.AbilityKit';
 import { fitVideoFrame } from './VideoLayout';
 import { Prefs, PlaybackSettings, SkipMarks, WatchEntry, entryFromStatus } from '../store/Prefs';
 import { Session } from '../store/Session';
+import { ChildrenQuota } from '../store/ChildrenQuota';
 import { SourceConfig, SearchItem, Detail } from '../api/Models';
 
 interface PlayerMenuAction { label: string; action: () => void; }
@@ -63,6 +64,13 @@ struct Player {
   @State outroStartMs: number = 0;
   @State autoIntro: boolean = false;
   @State autoOutro: boolean = false;
+  /** v1.5.2：片尾改记「距结束还有多久」，同一部剧时长不同的剧集也能对准 */
+  private outroRemainingMs: number = 0;
+  private outroReferenceMs: number = 0;
+  /** 当前是否受儿童额度管理（播放时计时，用完暂停） */
+  private childManaged: boolean = false;
+  private quotaTimer: number = -1;
+  private quota: ChildrenQuota | null = null;
   @State availableBitrates: number[] = [];
   @State selectedBitrate: number = 0;
   @State mediaTracks: PlayerTrack[] = [];
@@ -179,9 +187,15 @@ struct Player {
     }, 8000);
     Prefs.get(getContext(this)).then((p: Prefs) => {
       this.prefs = p;
+      ChildrenQuota.get(p).then((quota: ChildrenQuota) => {
+        this.quota = quota;
+        this.childManaged = !this.isLive && quota.isManaged(this.title);
+        this.startQuotaTimer();
+      }).catch(() => {});
       p.getSkipMarks(this.title).then((marks: SkipMarks) => {
         this.introEndMs = marks.introEndMs; this.outroStartMs = marks.outroStartMs;
         this.autoIntro = marks.autoIntro; this.autoOutro = marks.autoOutro;
+        this.outroRemainingMs = marks.outroRemainingMs; this.outroReferenceMs = marks.outroReferenceMs;
         this.marksLoaded = true;
       }).catch(() => {});
       p.getPlaybackSettings().then((settings: PlaybackSettings) => {
@@ -230,6 +244,7 @@ struct Player {
     this.stopSaveTimer();
     this.stopStartupTimer();
     this.stopSpeedTimer();
+    this.stopQuotaTimer();
     if (this.hudTimer >= 0) { clearTimeout(this.hudTimer); }
     if (this.sleepTimer >= 0) { clearTimeout(this.sleepTimer); }
     if (this.subtitleTimer >= 0) { clearTimeout(this.subtitleTimer); }
@@ -965,6 +980,27 @@ struct Player {
     else { this.seekTo(this.durMs - 300); this.notify('已跳过片尾，当前为最后一集'); }
   }
 
+  /**
+   * 本集该从哪一刻算作片尾（v1.5.2）。
+   * 新标记记的是「距结束还剩多少」，按当前集时长反推；但若当前集时长与记标记时
+   * 相差超过 max(30 秒, 25%)，说明不是同一规格的剧集，宁可不动也不误跳。
+   * 旧标记（没有 remaining）继续用绝对位置。
+   */
+  private effectiveOutroStart(): number {
+    if (this.outroRemainingMs > 0 && this.outroReferenceMs > 0) {
+      if (this.durMs <= 0) {
+        return -1;
+      }
+      const tolerance = Math.max(30000, this.outroReferenceMs / 4);
+      if (Math.abs(this.durMs - this.outroReferenceMs) > tolerance) {
+        return -1;
+      }
+      const start = this.durMs - this.outroRemainingMs;
+      return start > 0 && start < this.durMs - 5000 ? start : -1;
+    }
+    return this.outroStartMs > 0 && this.outroStartMs < this.durMs ? this.outroStartMs : -1;
+  }
+
   private applySkipMarks(time: number): void {
     if (this.isLive || !this.playing || this.switching || this.userDragging || this.durMs <= 0 || !this.marksLoaded) { return; }
     if (!this.introApplied) {
@@ -972,16 +1008,70 @@ struct Player {
       if (this.autoIntro && this.introEndMs > 0 && this.introEndMs < this.durMs &&
         Math.max(time, this.resumeMs) < this.introEndMs - 1500) { this.seekTo(this.introEndMs); return; }
     }
-    if (this.autoOutro && this.autoNext && this.outroStartMs > 0 && this.outroStartMs < this.durMs &&
-      this.outroMarkedEpisode !== this.episodeIndex && time >= this.outroStartMs &&
-      this.episodeIndex < this.episodes.length - 1) { this.switchEpisode(1); }
+    if (this.autoOutro && this.autoNext && this.outroMarkedEpisode !== this.episodeIndex &&
+      this.episodeIndex < this.episodes.length - 1) {
+      const start = this.effectiveOutroStart();
+      if (start > 0 && time >= start) { this.switchEpisode(1); }
+    }
   }
 
   private saveSkipMarks(): void {
     if (this.prefs === null) { return; }
     const marks: SkipMarks = { introEndMs: this.introEndMs, outroStartMs: this.outroStartMs,
-      autoIntro: this.autoIntro, autoOutro: this.autoOutro };
+      autoIntro: this.autoIntro, autoOutro: this.autoOutro,
+      outroRemainingMs: this.outroRemainingMs, outroReferenceMs: this.outroReferenceMs };
     this.prefs.setSkipMarks(this.title, marks).catch(() => { this.notify('片头片尾设置保存失败'); });
+  }
+
+  // ---------------------------------------------------------------- 儿童额度
+
+  /** 每秒核对一次；只有「受管理作品 + 正在播放」才计时，暂停/缓冲都不扣 */
+  private startQuotaTimer(): void {
+    if (this.quotaTimer >= 0) { return; }
+    this.quotaTimer = setInterval(() => {
+      const quota = this.quota;
+      if (quota === null || !this.childManaged || !this.playing || this.isLive) { return; }
+      const exhausted = quota.consume(1000);
+      if (exhausted) { this.pauseForQuota(); }
+    }, 1000);
+  }
+
+  private stopQuotaTimer(): void {
+    if (this.quotaTimer >= 0) { clearInterval(this.quotaTimer); this.quotaTimer = -1; }
+    if (this.quota !== null) { this.quota.flush(); }
+  }
+
+  private pauseForQuota(): void {
+    const p = this.player;
+    if (p === null) { return; }
+    p.pause().then(() => {
+      this.playing = false;
+      this.isPaused = true;
+      this.saveProgress(true);
+      this.showControls = true;
+      this.notify('今天的儿童时间已用完，明天再来吧');
+    }).catch(() => {});
+  }
+
+  /** 底部「换源」：带着片名去搜索，让用户挑另一个片源（v1.3.11 起常驻底部操作栏） */
+  private openSourceSwitch(): void {
+    this.saveProgress(true);
+    this.activeMenu = '';
+    const params: Record<string, string> = { 'keyword': this.title, 'fromPlayer': '1' };
+    router.pushUrl({ url: 'pages/Search', params: params }).catch(() => {
+      this.notify('无法打开搜索页');
+    });
+  }
+
+  /** 普通返回：保存进度、停止播放，直接回首页（v1.3.11） */
+  private leaveToHome(): void {
+    this.saveProgress(true);
+    this.stopQuotaTimer();
+    try {
+      router.back({ url: 'pages/Index' });
+    } catch (e) {
+      router.back();
+    }
   }
 
   private toggleFullscreen(): void {
@@ -1113,7 +1203,13 @@ struct Player {
       } });
       items.push({ label: '将当前位置记为片尾开始', action: () => {
         if (!this.canControl() || this.curMs <= 0) { return; }
-        this.outroStartMs = this.curMs; this.outroMarkedEpisode = this.episodeIndex; this.saveSkipMarks();
+        this.outroStartMs = this.curMs;
+        // 同时记下「距结束还有多久」，后续时长不同的剧集也能对准片尾
+        this.outroRemainingMs = this.durMs > this.curMs ? this.durMs - this.curMs : 0;
+        this.outroReferenceMs = this.durMs > 0 ? this.durMs : 0;
+        this.autoOutro = true;
+        this.outroMarkedEpisode = this.episodeIndex;
+        this.saveSkipMarks();
         this.notify('已保存本剧片尾位置');
       } });
       items.push({ label: `自动跳片头：${this.autoIntro ? '开' : '关'}`, action: () => { this.autoIntro = !this.autoIntro; this.saveSkipMarks(); } });
@@ -1123,6 +1219,7 @@ struct Player {
       }
       items.push({ label: '清除本剧标记并关闭自动跳过', action: () => {
         this.introEndMs = 90000; this.outroStartMs = 0; this.autoIntro = false; this.autoOutro = false;
+        this.outroRemainingMs = 0; this.outroReferenceMs = 0;
         this.saveSkipMarks(); this.notify('已清除');
       } });
     } else if (this.activeMenu === 'tracks') {
@@ -1136,6 +1233,8 @@ struct Player {
     } else {
       items.push({ label: '重新加载这一集', action: () => { this.reloadCurrent(); } });
       items.push({ label: '从头重播', action: () => { this.reloadCurrent(true); } });
+      items.push({ label: `清晰度：${this.qualityLabel()}`, action: () => { this.activeMenu = 'quality'; } });
+      items.push({ label: '换一个片源', action: () => { this.openSourceSwitch(); } });
       items.push({ label: '片头 / 片尾设置', action: () => { this.activeMenu = 'skip'; } });
       items.push({ label: `自动连播：${this.autoNext ? '开' : '关'}`, action: () => { this.autoNext = !this.autoNext; this.saveSettings(); } });
       items.push({ label: `显示比例：${this.cropVideo ? '裁切铺满' : '保持原比例'}`, action: () => {
@@ -1144,7 +1243,7 @@ struct Player {
       items.push({ label: '音轨 / 字幕', action: () => { this.activeMenu = 'tracks'; } });
       items.push({ label: this.sleepMinutes > 0 ? `定时暂停：${this.sleepMinutes} 分钟` : '定时暂停', action: () => { this.activeMenu = 'sleep'; } });
       items.push({ label: '锁定操作', action: () => { this.locked = true; this.activeMenu = ''; this.showControls = false; } });
-      items.push({ label: '退出播放', action: () => { router.back(); } });
+      items.push({ label: '退出播放', action: () => { this.leaveToHome(); } });
     }
     return items;
   }
@@ -1316,7 +1415,7 @@ struct Player {
           Row({ space: 10 }) {
             Text('<').fontSize(22).fontColor('#FFFFFF')
               .padding(10)
-              .onClick(() => { router.back(); })
+              .onClick(() => { this.leaveToHome(); })
             Text(this.isLive
               ? `${this.title} · 直播`
               : `${this.title} · 第${this.episodeIndex + 1}/${this.episodes.length}集`)
@@ -1355,7 +1454,10 @@ struct Player {
               this.toolbarButton(`倍速 ${this.speedLabels[this.speedIndex]}`, true, () => { this.activeMenu = 'speed'; })
             }
             this.toolbarButton('选集', true, () => { this.showEpisodes = true; })
-            this.toolbarButton(this.qualityLabel(), true, () => { this.activeMenu = 'quality'; })
+            // 换源常驻底部（v1.3.11）；清晰度收进「更多」，底部只留最常用的操作
+            if (!this.isLive) {
+              this.toolbarButton('换源', true, () => { this.openSourceSwitch(); })
+            }
             this.toolbarButton(this.pureFullscreen ? '还原' : '全屏', true, () => { this.toggleFullscreen(); })
             this.toolbarButton('更多', true, () => { this.activeMenu = 'more'; })
           }.width('100%').padding({ left: 8, right: 8, bottom: 8 })

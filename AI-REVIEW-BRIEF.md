@@ -1,4 +1,10 @@
-# 时光影院 HarmonyOS v1.1.2 —— 优化审查简报
+# 时光影院 HarmonyOS —— 优化审查简报（初稿写于 v1.1.2，现行版本 v1.5.5）
+
+> 说明：本文的代码地图与行数停留在 v1.1.2。v1.5.5 新增了儿童乐园
+> （`pages/Children.ets`、`store/ChildrenQuota.ets`、`api/ChildrenCatalog.ets`、
+> `components/ParentPanel.ets`）与独立直播播放器（`pages/LivePlayer.ets`、
+> `api/LivePlaylist.ets`、`store/LiveLocal.ets`），
+> 现行功能与版本差异以 `README.md` 为准。
 
 > 写给接下来接手审查的 AI（或人）。读完这份再动代码，能避开我们已经踩过的所有坑。
 > 项目根目录：`E:/Development/shiguang harmonyos`

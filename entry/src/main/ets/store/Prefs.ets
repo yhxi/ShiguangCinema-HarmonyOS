@@ -51,6 +51,14 @@ export interface SkipMarks {
   outroStartMs: number;
   autoIntro: boolean;
   autoOutro: boolean;
+  /**
+   * v1.5.2 起，片尾标记改记「距结束还有多少毫秒」，而不是绝对位置。
+   * 这样同一部剧里时长不同的剧集也能落到真正一致的片尾点。
+   * 旧标记这两个字段是 0，走 legacyStart 兼容路径。
+   */
+  outroRemainingMs: number;
+  /** 记标记时那一集的总时长，用来判断后续剧集是否差异过大（>max(30s, 25%)）就不再自动跳 */
+  outroReferenceMs: number;
 }
 
 /** 检查更新结果缓存 */
@@ -89,10 +97,14 @@ export class Prefs {
 
   async getSkipMarks(title: string): Promise<SkipMarks> {
     const raw = s((this.store as preferences.Preferences).getSync(`skip:${title.trim().toLowerCase()}`, ''));
-    if (raw === '') { return { introEndMs: 90000, outroStartMs: 0, autoIntro: false, autoOutro: false }; }
+    if (raw === '') {
+      return { introEndMs: 90000, outroStartMs: 0, autoIntro: false, autoOutro: false,
+        outroRemainingMs: 0, outroReferenceMs: 0 };
+    }
     const o = parseObj(raw);
     return { introEndMs: Math.max(0, n(o['introEndMs'], 90000)), outroStartMs: Math.max(0, n(o['outroStartMs'])),
-      autoIntro: b(o['autoIntro']), autoOutro: b(o['autoOutro']) };
+      autoIntro: b(o['autoIntro']), autoOutro: b(o['autoOutro']),
+      outroRemainingMs: Math.max(0, n(o['outroRemainingMs'])), outroReferenceMs: Math.max(0, n(o['outroReferenceMs'])) };
   }
 
   async setSkipMarks(title: string, marks: SkipMarks): Promise<void> {
@@ -471,6 +483,45 @@ export class Prefs {
     const root: Record<string, Object> = { 'list': arr as Object, 'selected': selected };
     map.set(serverUrl, JSON.stringify(root));
     await this.putMap(KEY_LIVE, map);
+  }
+
+  // ---------- 通用键值（儿童额度、直播本地频道等模块共用） ----------
+
+  /** 读原始字符串。模块自己的小状态不必都在这类里加一个方法。 */
+  getRaw(key: string, def: string): string {
+    return s((this.store as preferences.Preferences).getSync(key, def));
+  }
+
+  async putRaw(key: string, value: string): Promise<void> {
+    await (this.store as preferences.Preferences).put(key, value);
+    await (this.store as preferences.Preferences).flush();
+  }
+
+  /** 读字符串数组（JSON 数组）；解析失败一律当空 */
+  getStringList(key: string): string[] {
+    const raw = s((this.store as preferences.Preferences).getSync(key, ''));
+    if (raw === '') {
+      return [];
+    }
+    let arr: Object[] | null = null;
+    try {
+      arr = asArr(JSON.parse(raw) as Object);
+    } catch (e) {
+      return [];
+    }
+    const out: string[] = [];
+    if (arr !== null) {
+      for (const item of arr) {
+        if (typeof item === 'string' && (item as string).trim() !== '') {
+          out.push(item as string);
+        }
+      }
+    }
+    return out;
+  }
+
+  async putStringList(key: string, list: string[]): Promise<void> {
+    await this.putRaw(key, JSON.stringify(list));
   }
 }
 
