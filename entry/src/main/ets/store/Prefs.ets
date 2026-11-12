@@ -19,6 +19,8 @@ const KEY_SOURCES = 'sources';          // { url: SourceConfig[] }
 const KEY_HISTORY = 'history';          // WatchEntry[]
 const KEY_FAVORITES = 'favorites';      // WatchEntry[]（追剧：只存元数据）
 const KEY_LIVE = 'live';                // { serverUrl: {list: string[], selected: number} }
+const KEY_SEARCH_HISTORY = 'searchHistory'; // string[] 最近搜索词
+const MAX_SEARCH_HISTORY = 12;
 
 export interface WatchEntry {
   /** 唯一键：serverUrl|sourceUrl|vodId */
@@ -522,6 +524,42 @@ export class Prefs {
 
   async putStringList(key: string, list: string[]): Promise<void> {
     await this.putRaw(key, JSON.stringify(list));
+  }
+
+  // ---------- 搜索历史（v1.5.5 补齐：对齐 Android 的 addSearchHistory） ----------
+
+  /** 最近搜索关键词，最新的在前，最多 12 条 */
+  getSearchHistory(): string[] {
+    return this.getStringList(KEY_SEARCH_HISTORY);
+  }
+
+  async addSearchHistory(keyword: string): Promise<void> {
+    const value: string = keyword.trim();
+    if (value === '') {
+      return;
+    }
+    const out: string[] = [value];
+    for (const item of this.getSearchHistory()) {
+      // 同一个词再搜一次就挪到最前面，而不是留两条
+      if (item !== value && out.length < MAX_SEARCH_HISTORY) {
+        out.push(item);
+      }
+    }
+    await this.putStringList(KEY_SEARCH_HISTORY, out);
+  }
+
+  async removeSearchHistory(keyword: string): Promise<void> {
+    const out: string[] = [];
+    for (const item of this.getSearchHistory()) {
+      if (item !== keyword) {
+        out.push(item);
+      }
+    }
+    await this.putStringList(KEY_SEARCH_HISTORY, out);
+  }
+
+  async clearSearchHistory(): Promise<void> {
+    await this.putStringList(KEY_SEARCH_HISTORY, []);
   }
 }
 

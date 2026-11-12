@@ -65,7 +65,8 @@ struct History {
   private goDetail(e: WatchEntry): void {
     router.pushUrl({
       url: 'pages/Detail',
-      params: { sourceUrl: e.sourceUrl, vodId: e.vodId, resumeKey: e.key } as RouteParams
+      // 带上片名：选集若命中本地缓存，详情页可以立刻有标题而不是空白
+      params: { sourceUrl: e.sourceUrl, vodId: e.vodId, resumeKey: e.key, title: e.title } as RouteParams
     });
   }
 

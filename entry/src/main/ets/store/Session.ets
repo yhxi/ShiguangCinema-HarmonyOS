@@ -7,6 +7,14 @@ import { Api } from '../api/Api';
 import { DirectCms } from '../api/DirectCms';
 import { AppStatus, SourceConfig, SearchItem, builtInSources } from '../api/Models';
 
+interface SearchCacheEntry {
+  items: SearchItem[];
+  at: number;
+}
+
+/** 最近 20 个关键词的结果（对齐 Android 的 searchCache 上限） */
+const SEARCH_CACHE_MAX = 20;
+
 export class Session {
   private static instance: Session | null = null;
 
@@ -16,19 +24,42 @@ export class Session {
   sources: SourceConfig[] = [];
   readonly directCms: DirectCms = new DirectCms();
   private connectionGeneration: number = 0;
-  private searchCacheServer: string = '';
-  private searchCacheKeyword: string = '';
-  private searchCacheItems: SearchItem[] = [];
+  /** 键：serverUrl|keyword；换服务端不会串结果 */
+  private searchCache: Map<string, SearchCacheEntry> = new Map();
 
+  private searchCacheKey(keyword: string): string {
+    return `${this.serverUrl}|${keyword.trim()}`;
+  }
+
+  /**
+   * 记住一次搜索的结果。
+   * 空结果不记：搜不到往往是片源临时抽风，记下来只会让下次进搜索页先铺一层空。
+   */
   rememberSearch(keyword: string, items: SearchItem[]): void {
-    this.searchCacheServer = this.serverUrl;
-    this.searchCacheKeyword = keyword.trim();
-    this.searchCacheItems = items.slice();
+    if (items.length === 0) {
+      return;
+    }
+    const key = this.searchCacheKey(keyword);
+    this.searchCache.delete(key);
+    this.searchCache.set(key, { items: items.slice(), at: Date.now() });
+    if (this.searchCache.size > SEARCH_CACHE_MAX) {
+      let oldestKey = '';
+      let oldestAt = Number.MAX_SAFE_INTEGER;
+      this.searchCache.forEach((entry: SearchCacheEntry, k: string) => {
+        if (entry.at < oldestAt) {
+          oldestAt = entry.at;
+          oldestKey = k;
+        }
+      });
+      if (oldestKey !== '') {
+        this.searchCache.delete(oldestKey);
+      }
+    }
   }
 
   cachedSearch(keyword: string): SearchItem[] {
-    if (this.searchCacheServer !== this.serverUrl || this.searchCacheKeyword !== keyword.trim()) { return []; }
-    return this.searchCacheItems.slice();
+    const entry = this.searchCache.get(this.searchCacheKey(keyword));
+    return entry !== undefined ? entry.items.slice() : [];
   }
 
   invalidateConnection(): void { this.connectionGeneration++; }

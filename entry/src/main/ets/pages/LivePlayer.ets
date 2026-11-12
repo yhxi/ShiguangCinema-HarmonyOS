@@ -19,6 +19,8 @@ import { fitVideoFrame } from './VideoLayout';
 import { Prefs } from '../store/Prefs';
 import { LiveLocal } from '../store/LiveLocal';
 import { liveChannelKey, parseChannelHeaders, stepLiveChannel } from '../api/LivePlaylist';
+import { PinyinInitials } from '../api/PinyinInitials';
+import { matchesInitials } from '../common/TextClean';
 import { Theme } from '../common/Theme';
 
 /**
@@ -383,7 +385,8 @@ struct LivePlayer {
     const out: number[] = [];
     for (let i = 0; i < this.urls.length; i++) {
       const name = i < this.names.length ? this.names[i] : `频道 ${i + 1}`;
-      if (kw === '' || name.toLowerCase().includes(kw)) {
+      if (kw === '' || name.toLowerCase().includes(kw) ||
+        matchesInitials(PinyinInitials.initialsOf(name), kw)) {
         out.push(i);
       }
     }

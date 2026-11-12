@@ -10,6 +10,8 @@ import { Detail, SourceConfig } from '../api/Models';
 import { Prefs, WatchEntry, watchKey } from '../store/Prefs';
 import { Session } from '../store/Session';
 import { ChildrenQuota } from '../store/ChildrenQuota';
+import { EpisodeCache } from '../store/EpisodeCache';
+import { stripHtml } from '../common/TextClean';
 import { PosterImage } from '../components/PosterImage';
 import { Theme } from '../common/Theme';
 
@@ -89,10 +91,31 @@ struct DetailPage {
         this.loading = false;
         // 有缓存就后台静默校验，用户看到的始终是内容而不是转圈
         this.loadDetail(true).catch(() => {});
+      } else if (this.useEpisodeCache()) {
+        // 上千集的剧，选集列表落过盘就直接铺出来，详情信息随后补上
+        this.loading = false;
+        this.loadDetail(true).catch(() => {});
       } else {
         this.loadDetail();
       }
     });
+  }
+
+  /** 只是把缓存里的选集铺上去；标题等元信息仍等网络回来再填 */
+  private useEpisodeCache(): boolean {
+    if (this.vodId === '' || this.sourceUrl === '') {
+      return false;
+    }
+    const urls = EpisodeCache.get(getContext(this), this.session.serverUrl, this.sourceUrl, this.vodId, '');
+    if (urls === null) {
+      return false;
+    }
+    this.episodes = urls;
+    if (this.lastWatch !== null && this.lastWatch.episodeIndex >= 0 &&
+      this.lastWatch.episodeIndex < urls.length) {
+      this.selected = this.lastWatch.episodeIndex;
+    }
+    return true;
   }
 
   /** 标题拿到之后才知道这片归不归儿童额度管 */
@@ -172,7 +195,7 @@ struct DetailPage {
     this.episodes = d.episodes;
     this.info = {
       'title': d.info.title !== '' ? d.info.title : this.info['title'],
-      'cover': d.info.cover, 'desc': d.info.desc, 'remarks': d.info.remarks,
+      'cover': d.info.cover, 'desc': stripHtml(d.info.desc), 'remarks': d.info.remarks,
       'year': d.info.year, 'area': d.info.area, 'actor': d.info.actor
     };
     if (this.lastWatch !== null && this.lastWatch.episodeIndex >= 0 &&
@@ -180,6 +203,7 @@ struct DetailPage {
       this.selected = this.lastWatch.episodeIndex;
     }
     DETAIL_CACHE.set(`${this.sourceUrl}|${this.vodId}`, { detail: d, at: Date.now() });
+    EpisodeCache.put(getContext(this), this.session.serverUrl, this.sourceUrl, this.vodId, d.episodes);
     // 片名以详情为准，拿到后再判断是否受儿童额度管理
     this.refreshKidState().catch(() => {});
   }

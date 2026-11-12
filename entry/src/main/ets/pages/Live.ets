@@ -17,6 +17,8 @@ import { Api, BUILT_IN_LIVE_SOURCES, liveSourceLabel } from '../api/Api';
 import { Prefs } from '../store/Prefs';
 import { LiveLocal } from '../store/LiveLocal';
 import { liveChannelKey, sortedLiveChannels } from '../api/LivePlaylist';
+import { PinyinInitials } from '../api/PinyinInitials';
+import { matchesInitials } from '../common/TextClean';
 import { Theme } from '../common/Theme';
 import { Session } from '../store/Session';
 
@@ -101,6 +103,19 @@ struct Live {
   private channels: Channel[] = [];
   private favorites: Set<string> = new Set();
   private groupSource: GroupSource = new GroupSource();
+  /** 频道名 -> 拼音首字母；过滤时缓存，避免每敲一个字都重算几千个频道 */
+  private initialsCache: Map<string, string> = new Map();
+
+  /** 频道过滤也吃拼音首字母：「zjws」能过滤出浙江卫视 */
+  private initialsOf(name: string): string {
+    const hit = this.initialsCache.get(name);
+    if (hit !== undefined) {
+      return hit;
+    }
+    const value = PinyinInitials.initialsOf(name);
+    this.initialsCache.set(name, value);
+    return value;
+  }
 
   aboutToAppear(): void {
     Prefs.get(getContext(this)).then(async (p: Prefs) => {
@@ -166,7 +181,8 @@ struct Live {
     const favChannels: Channel[] = [];
     const byGroup: Map<string, Channel[]> = new Map();
     for (const ch of this.channels) {
-      if (kw !== '' && !ch.name.toLowerCase().includes(kw) && !ch.group.toLowerCase().includes(kw)) {
+      if (kw !== '' && !ch.name.toLowerCase().includes(kw) && !ch.group.toLowerCase().includes(kw) &&
+        !matchesInitials(this.initialsOf(ch.name), kw)) {
         continue;
       }
       if (this.favorites.has(liveChannelKey(ch.name))) {
@@ -396,7 +412,7 @@ struct Live {
         }
       }.width('100%').padding({ left: 16, right: 16, bottom: 8 })
 
-      TextInput({ placeholder: '过滤频道 / 分组…', text: this.filterText })
+      TextInput({ placeholder: '过滤频道 / 分组，可用拼音首字母', text: this.filterText })
         .fontSize(15).height(44).borderRadius(14)
         .backgroundColor(Theme.PANEL).fontColor(Theme.INK)
         .placeholderColor(Theme.SECONDARY)

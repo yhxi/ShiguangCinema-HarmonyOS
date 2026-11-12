@@ -5,6 +5,7 @@ import { clearPosterCache } from '../components/PosterImage';
 import { Session } from '../store/Session';
 import { Prefs, UpdateState } from '../store/Prefs';
 import { ChildrenQuota } from '../store/ChildrenQuota';
+import { EpisodeCache } from '../store/EpisodeCache';
 import { checkUpdate, isNewerVersion, releasesPageUrl, ReleaseInfo } from '../api/UpdateChecker';
 import { UpdateDialog } from '../components/UpdateDialog';
 import { Theme } from '../common/Theme';
@@ -79,7 +80,9 @@ struct SettingsPage {
 
   private clearCache(): void {
     clearPosterCache();
-    promptAction.showToast({ message: '图片缓存已清理' });
+    // 选集列表缓存也一起清，否则用户点了清理还会看到旧的集数
+    EpisodeCache.clear(getContext(this));
+    promptAction.showToast({ message: '图片与选集缓存已清理' });
   }
 
   private showUpdateInfo(): void {
