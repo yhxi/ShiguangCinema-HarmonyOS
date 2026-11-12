@@ -88,6 +88,7 @@ struct LivePlayer {
   private disposed: boolean = false;
   private generation: number = 0;
   private hideTimer: number = -1;
+  private startupTimer: number = -1;
   private triedLines: Set<number> = new Set();
   private videoWidth: number = 16;
   private videoHeight: number = 9;
@@ -120,6 +121,7 @@ struct LivePlayer {
     this.disposed = true;
     this.generation++;
     if (this.hideTimer >= 0) { clearTimeout(this.hideTimer); }
+    this.stopStartupTimer();
     this.releasePlayer();
     this.restoreWindow();
   }
@@ -210,13 +212,14 @@ struct LivePlayer {
       return;
     }
     const generation = ++this.generation;
+    this.startStartupTimer(generation);
     this.loadMessage = '正在连接频道…';
     this.errorMsg = '';
     this.playing = false;
     this.triedLines.add(this.index);
     const old = this.player;
     this.player = null;
-    if (old !== null) { await old.release().catch(() => {}); }
+    if (old !== null) { await this.releaseBeforeRestart(old); }
     if (this.disposed || generation !== this.generation) { return; }
     try {
       const p = await media.createAVPlayer();
@@ -236,6 +239,25 @@ struct LivePlayer {
       if (this.disposed || generation !== this.generation) { return; }
       this.handleFailure((e as Error).message);
     }
+  }
+
+  private async releaseBeforeRestart(player: media.AVPlayer): Promise<void> {
+    let timer: number = -1;
+    const deadline = new Promise<void>((resolve: () => void) => { timer = setTimeout(resolve, 2000); });
+    try { await Promise.race([player.release().catch(() => {}), deadline]); }
+    finally { if (timer >= 0) { clearTimeout(timer); } }
+  }
+
+  private stopStartupTimer(): void {
+    if (this.startupTimer >= 0) { clearTimeout(this.startupTimer); this.startupTimer = -1; }
+  }
+
+  private startStartupTimer(generation: number): void {
+    this.stopStartupTimer();
+    this.startupTimer = setTimeout(() => {
+      if (this.disposed || generation !== this.generation) { return; }
+      this.handleFailure('频道连接超时');
+    }, 20000);
   }
 
   private bindEvents(p: media.AVPlayer, generation: number): void {
@@ -263,8 +285,6 @@ struct LivePlayer {
         this.playing = true;
         this.loadMessage = '';
         this.errorMsg = '';
-        this.triedLines.clear();
-        this.triedLines.add(this.index);
         this.scheduleHide();
       } else if (state === 'paused' || state === 'stopped' || state === 'completed') {
         this.playing = false;
@@ -272,6 +292,9 @@ struct LivePlayer {
     });
     p.on('startRenderFrame', () => {
       if (this.disposed || generation !== this.generation) { return; }
+      this.stopStartupTimer();
+      this.triedLines.clear();
+      this.triedLines.add(this.index);
       this.loadMessage = '';
     });
     p.on('videoSizeChange', (width: number, height: number) => {
@@ -290,8 +313,13 @@ struct LivePlayer {
 
   /** 主线路失败：先找同名的其他线路，全部试过才报错 */
   private handleFailure(reason: string): void {
+    this.stopStartupTimer();
     this.loadMessage = '';
     if (this.switchToBackupLine()) { return; }
+    // Make callbacks from a timed-out or failed player stale before showing the error.
+    this.generation++;
+    this.playing = false;
+    this.releasePlayer();
     this.errorMsg = `${reason}。该频道暂无可用线路，可换个频道或返回重试。`;
   }
 

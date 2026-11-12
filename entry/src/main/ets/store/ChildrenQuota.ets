@@ -19,6 +19,9 @@ const KEY_BONUS = 'childrenBonusMs';
 const KEY_USED = 'childrenUsedMs';
 const KEY_DAY = 'childrenUsedDay';
 const KEY_TRACKED = 'childrenTrackedTitles';
+const KEY_STATE = 'childrenQuotaStateV2';
+
+interface QuotaState { day: string; usedMs: number; bonusMs: number; limitMinutes: number; }
 
 /** 单集/单条记录里带的剧集后缀：「 · 第3集」之后都不算剧名 */
 export function seriesNameOf(label: string): string {
@@ -95,6 +98,7 @@ export class ChildrenQuota {
   /** 内置清单的归一 key，构造一次即可 */
   private catalogKeys: Set<string> = new Set<string>();
   private dirtyMs: number = 0;
+  private persistChain: Promise<void> = Promise.resolve();
 
   private constructor() {
   }
@@ -115,6 +119,20 @@ export class ChildrenQuota {
     quota.bonusMs = Math.max(0, parseInt(prefs.getRaw(KEY_BONUS, '0'), 10) || 0);
     quota.usedMs = Math.max(0, parseInt(prefs.getRaw(KEY_USED, '0'), 10) || 0);
     quota.day = prefs.getRaw(KEY_DAY, '');
+    const saved = prefs.getRaw(KEY_STATE, '');
+    if (saved !== '') {
+      try {
+        const state = JSON.parse(saved) as QuotaState;
+        if (typeof state.day === 'string' && typeof state.usedMs === 'number' &&
+          typeof state.bonusMs === 'number' && typeof state.limitMinutes === 'number' &&
+          isFinite(state.usedMs) && isFinite(state.bonusMs) && isFinite(state.limitMinutes)) {
+          quota.day = state.day;
+          quota.usedMs = Math.max(0, state.usedMs);
+          quota.bonusMs = Math.max(0, state.bonusMs);
+          quota.limitMinutes = Math.max(1, Math.min(240, state.limitMinutes));
+        }
+      } catch (e) { /* Fall back to legacy fields. */ }
+    }
     quota.tracked = prefs.getStringList(KEY_TRACKED);
     quota.rollOverIfNeeded();
     ChildrenQuota.instance = quota;
@@ -138,7 +156,7 @@ export class ChildrenQuota {
     this.bonusMs = 0;
     this.day = today;
     this.dirtyMs = 0;
-    this.persist(true);
+    this.persist(true).catch(() => {});
   }
 
   private limitMs(): number {
@@ -202,36 +220,33 @@ export class ChildrenQuota {
     this.dirtyMs += elapsedMs;
     // 每 5 秒落盘一次；暂停、退出时由调用方 flush()
     if (this.dirtyMs >= 5000) {
-      this.persist(false);
+      this.persist(false).catch(() => {});
     }
     return this.remainingMs() <= 0;
   }
 
   /** 强制落盘（暂停 / 退出播放页 / 切后台时调用） */
   flush(): void {
-    this.persist(true);
+    this.persist(true).catch(() => {});
   }
 
-  private persist(force: boolean): void {
-    if (this.prefs === null) {
-      return;
-    }
-    if (!force && this.dirtyMs < 5000) {
-      return;
-    }
-    this.dirtyMs = 0;
+  private persist(force: boolean): Promise<void> {
     const p = this.prefs;
-    p.putRaw(KEY_DAY, this.day).catch(() => {});
-    p.putRaw(KEY_USED, this.usedMs.toString()).catch(() => {});
-    p.putRaw(KEY_BONUS, this.bonusMs.toString()).catch(() => {});
-    p.putRaw(KEY_LIMIT, this.limitMinutes.toString()).catch(() => {});
+    if (p === null || (!force && this.dirtyMs < 5000)) { return Promise.resolve(); }
+    const state: QuotaState = { day: this.day, usedMs: this.usedMs,
+      bonusMs: this.bonusMs, limitMinutes: this.limitMinutes };
+    this.dirtyMs = 0;
+    // 串行写完整快照，避免旧写入晚于新写入，也避免日期与用量分开落盘。
+    const write = this.persistChain.catch(() => {}).then(() => p.putRaw(KEY_STATE, JSON.stringify(state)));
+    this.persistChain = write.catch(() => { this.dirtyMs = Math.max(this.dirtyMs, 5000); });
+    return write;
   }
 
   // ---------------------------------------------------------------- 家长设置
 
   async setDailyMinutes(minutes: number): Promise<void> {
     this.limitMinutes = Math.max(1, Math.min(240, Math.round(minutes)));
-    this.persist(true);
+    await this.persist(true);
   }
 
   /** 仅今天加时，不写进每日固定额度 */
@@ -240,7 +255,7 @@ export class ChildrenQuota {
       return;
     }
     this.bonusMs += Math.round(minutes) * 60000;
-    this.persist(true);
+    await this.persist(true);
   }
 
   // ---------------------------------------------------------------- 作品管理

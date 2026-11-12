@@ -36,6 +36,7 @@ const EPISODE_SEGMENT = 100;
 struct DetailPage {
   @State loading: boolean = true;
   @State errorMsg: string = '';
+  @State cacheNotice: string = '';
   @State episodes: string[] = [];
   @State info: Record<string, string> = {
     'title': '', 'cover': '', 'desc': '', 'remarks': '', 'year': '', 'area': '', 'actor': ''
@@ -88,14 +89,16 @@ struct DetailPage {
           }
         }
       }
-      const cacheKey = `${this.sourceUrl}|${this.vodId}`;
+      const cacheKey = `${this.session.serverUrl}|${this.sourceUrl}|${this.vodId}`;
       const cached = DETAIL_CACHE.get(cacheKey);
       if (cached !== undefined && Date.now() - cached.at < DETAIL_CACHE_TTL_MS) {
-        this.applyDetail(cached.detail);
+        this.applyDetail(cached.detail, false);
+        this.cacheNotice = '正在更新缓存的选集…';
         this.loading = false;
         // 有缓存就后台静默校验，用户看到的始终是内容而不是转圈
         this.loadDetail(true).catch(() => {});
       } else if (this.useEpisodeCache()) {
+        this.cacheNotice = '正在更新缓存的选集…';
         // 上千集的剧，选集列表落过盘就直接铺出来，详情信息随后补上
         this.loading = false;
         this.loadDetail(true).catch(() => {});
@@ -164,7 +167,7 @@ struct DetailPage {
     const api = this.session.api;
     const src = this.findSource();
     if (api === null || src === null) {
-      if (silent) { return; }
+      if (silent) { this.cacheNotice = '选集更新失败，当前显示缓存，地址可能已失效'; return; }
       this.loading = false;
       this.errorMsg = '会话已断开，请返回首页重新连接';
       return;
@@ -191,12 +194,14 @@ struct DetailPage {
     } catch (e) {
       // 静默刷新失败就保留缓存内容，不弹错
       if (!silent) { this.errorMsg = (e as Error).message; }
+      else { this.cacheNotice = '选集更新失败，当前显示缓存，地址可能已失效'; }
     } finally {
       this.loading = false;
     }
   }
 
-  private applyDetail(d: Detail): void {
+  private applyDetail(d: Detail, fresh: boolean = true): void {
+    if (fresh) { this.cacheNotice = ''; }
     this.episodes = d.episodes;
     this.info = {
       'title': d.info.title !== '' ? d.info.title : this.info['title'],
@@ -208,8 +213,10 @@ struct DetailPage {
       this.selected = this.lastWatch.episodeIndex;
       this.focusSegment(this.lastWatch.episodeIndex);
     }
-    DETAIL_CACHE.set(`${this.sourceUrl}|${this.vodId}`, { detail: d, at: Date.now() });
-    EpisodeCache.put(getContext(this), this.session.serverUrl, this.sourceUrl, this.vodId, d.episodes);
+    if (fresh) {
+      DETAIL_CACHE.set(`${this.session.serverUrl}|${this.sourceUrl}|${this.vodId}`, { detail: d, at: Date.now() });
+      EpisodeCache.put(getContext(this), this.session.serverUrl, this.sourceUrl, this.vodId, d.episodes);
+    }
     // 片名以详情为准，拿到后再判断是否受儿童额度管理
     this.refreshKidState().catch(() => {});
   }
@@ -235,6 +242,7 @@ struct DetailPage {
     }
     if (this.sourceName !== '') { parts.push(this.sourceName); }
     if (this.episodes.length > 0) { parts.push(`共 ${this.episodes.length} 集`); }
+    if (this.cacheNotice !== '') { parts.push(this.cacheNotice); }
     return parts.join(' · ');
   }
 

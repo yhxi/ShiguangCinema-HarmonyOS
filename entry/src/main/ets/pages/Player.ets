@@ -108,6 +108,8 @@ struct Player {
   /** 当前是否受儿童额度管理（播放时计时，用完暂停） */
   private childManaged: boolean = false;
   private quotaTimer: number = -1;
+  private quotaLastAt: number = 0;
+  private quotaPausePending: boolean = false;
   private quota: ChildrenQuota | null = null;
   @State availableBitrates: number[] = [];
   @State selectedBitrate: number = 0;
@@ -418,6 +420,7 @@ struct Player {
   private bindPlayerEvents(p: media.AVPlayer, generation: number): void {
     p.on('stateChange', (state: string) => {
       if (this.disposed || generation !== this.playerGeneration) { return; }
+      this.accountQuota();
       hilog.info(0, 'ShiguangCinema', 'player state=%{public}s generation=%{public}d', state, generation);
       if (state === 'initialized') {
         this.loadMessage = '正在解析视频并缓冲…';
@@ -477,6 +480,7 @@ struct Player {
         this.playing = false;
         this.stopBackgroundTask();
       } else if (state === 'paused') {
+        if (this.quota !== null) { this.quota.flush(); }
         this.playing = false;
         this.isPaused = true;
         this.updateBackgroundSession(false);
@@ -545,6 +549,9 @@ struct Player {
     });
     p.on('bufferingUpdate', (infoType: media.BufferingInfoType, value: number) => {
       if (this.disposed || generation !== this.playerGeneration) { return; }
+      if (infoType === media.BufferingInfoType.BUFFERING_START || infoType === media.BufferingInfoType.BUFFERING_END) {
+        this.accountQuota();
+      }
       if (infoType === media.BufferingInfoType.BUFFERING_START) {
         this.buffering = true;
         this.startSpeedTimer();
@@ -564,6 +571,7 @@ struct Player {
     });
     p.on('error', (err: BusinessError) => {
       if (this.disposed || generation !== this.playerGeneration) { return; }
+      this.accountQuota();
       this.switching = false;
       this.playing = false;
       this.buffering = false;
@@ -1067,32 +1075,45 @@ struct Player {
 
   // ---------------------------------------------------------------- 儿童额度
 
-  /** 每秒核对一次；只有「受管理作品 + 正在播放」才计时，暂停/缓冲都不扣 */
+  /** 按经过时间计费，并在播放与缓冲状态变化时结算。 */
+  private accountQuota(): void {
+    const now = Date.now();
+    const previous = this.quotaLastAt;
+    this.quotaLastAt = now;
+    const quota = this.quota;
+    if (previous <= 0 || now <= previous || quota === null || !this.childManaged ||
+      !this.playing || this.buffering || this.isLive || this.quotaPausePending) { return; }
+    // 跨零点时，昨天的部分不计入今天的额度。
+    const midnight = new Date(now);
+    midnight.setHours(0, 0, 0, 0);
+    const elapsed = now - Math.max(previous, midnight.getTime());
+    if (elapsed > 0 && quota.consume(elapsed)) { this.pauseForQuota(); }
+  }
+
   private startQuotaTimer(): void {
     if (this.quotaTimer >= 0) { return; }
-    this.quotaTimer = setInterval(() => {
-      const quota = this.quota;
-      if (quota === null || !this.childManaged || !this.playing || this.isLive) { return; }
-      const exhausted = quota.consume(1000);
-      if (exhausted) { this.pauseForQuota(); }
-    }, 1000);
+    this.quotaLastAt = Date.now();
+    this.quotaTimer = setInterval(() => { this.accountQuota(); }, 1000);
   }
 
   private stopQuotaTimer(): void {
+    this.accountQuota();
     if (this.quotaTimer >= 0) { clearInterval(this.quotaTimer); this.quotaTimer = -1; }
+    this.quotaLastAt = 0;
     if (this.quota !== null) { this.quota.flush(); }
   }
 
   private pauseForQuota(): void {
     const p = this.player;
-    if (p === null) { return; }
+    if (p === null || this.quotaPausePending) { return; }
+    this.quotaPausePending = true;
     p.pause().then(() => {
       this.playing = false;
       this.isPaused = true;
       this.saveProgress(true);
       this.showControls = true;
       this.notify('今天的儿童时间已用完，明天再来吧');
-    }).catch(() => {});
+    }).catch(() => {}).finally(() => { this.quotaPausePending = false; });
   }
 
   /** 底部「换源」：带着片名去搜索，让用户挑另一个片源（v1.3.11 起常驻底部操作栏） */

@@ -247,10 +247,13 @@ struct SearchPage {
       if (this.session.directCms.shouldTryDirect(src)) { direct.push(src); }
       else { fallback.push(src); }
     }
-    const serverTask: Promise<void> = fallback.length > 0
-      ? api.search(kw, fallback).then((r) => {
+    const initialFallback = fallback.splice(0, fallback.length);
+    const serverTask: Promise<void> = initialFallback.length > 0
+      ? api.search(kw, initialFallback).then((r) => {
         if (generation === this.searchGeneration) { this.applyIncoming(r.items); }
-      }).catch(() => {}) : Promise.resolve();
+      }).catch(() => {
+        if (generation === this.searchGeneration) { fallback.push(...initialFallback); }
+      }) : Promise.resolve();
     let next = 0;
     const run = async (): Promise<void> => {
       while (generation === this.searchGeneration && next < direct.length) {

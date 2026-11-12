@@ -51,11 +51,7 @@ class PosterCache {
     PosterCache.graveyard = [];
     PosterCache.failures.clear();
     PosterCache.pending.clear();
-    // 唤醒所有排队者，它们会凭 generation 自行放弃，不会把旧结果写回来
-    const waiting = PosterCache.visibleWaiting.concat(PosterCache.prefetchWaiting);
-    PosterCache.visibleWaiting = [];
-    PosterCache.prefetchWaiting = [];
-    for (const resume of waiting) { resume(); }
+    // 排队请求继续通过槽位逐一退出，避免同时唤醒后突破并发上限。
     PosterCache.diskBroken = false;
   }
 
@@ -84,21 +80,25 @@ class PosterCache {
     PosterCache.failures.delete(pendingKey);
     const existing = PosterCache.pending.get(pendingKey);
     if (existing !== undefined) { return existing; }
-    const job = PosterCache.load(url, proxy, cookie, priority, PosterCache.generation);
+    const generation = PosterCache.generation;
+    const job = PosterCache.load(url, proxy, cookie, priority, generation);
     PosterCache.pending.set(pendingKey, job);
     try {
       const result = await job;
-      if (result === null) {
+      if (result === null && generation === PosterCache.generation) {
         if (PosterCache.failures.size >= 300) { PosterCache.failures.clear(); }
         PosterCache.failures.set(pendingKey, Date.now());
       }
       return result;
-    } finally { PosterCache.pending.delete(pendingKey); }
+    } finally {
+      if (PosterCache.pending.get(pendingKey) === job) { PosterCache.pending.delete(pendingKey); }
+    }
   }
 
   /** 取并发槽位；满了就按优先级排队 */
   private static async acquire(priority: boolean): Promise<void> {
     if (PosterCache.active < 6) {
+      PosterCache.active++;
       return;
     }
     await new Promise<void>((resolve: () => void) => {
@@ -111,16 +111,14 @@ class PosterCache {
   }
 
   private static releaseSlot(): void {
-    PosterCache.active--;
     const next = PosterCache.visibleWaiting.length > 0 ? PosterCache.visibleWaiting.shift()
       : PosterCache.prefetchWaiting.shift();
-    if (next !== undefined) { next(); }
+    if (next !== undefined) { next(); } else { PosterCache.active--; }
   }
 
   private static async load(url: string, proxy: string, cookie: string,
     priority: boolean, generation: number): Promise<image.PixelMap | null> {
     await PosterCache.acquire(priority);
-    PosterCache.active++;
     try {
       if (generation !== PosterCache.generation) { return null; }
       // 1) 磁盘
@@ -137,7 +135,7 @@ class PosterCache {
       }
       if (result !== null && generation === PosterCache.generation) {
         PosterCache.remember(url, result);
-        PosterCache.writeDisk(url, result);
+        PosterCache.writeDisk(url, result, generation);
       }
       return result;
     } finally {
@@ -205,12 +203,13 @@ class PosterCache {
     }
   }
 
-  private static writeDisk(url: string, bitmap: image.PixelMap): void {
+  private static writeDisk(url: string, bitmap: image.PixelMap, generation: number): void {
     if (PosterCache.diskBroken || PosterCache.diskDir === '') { return; }
     // 打包 + 落盘是纯后台动作，失败也不影响界面
     const packer = image.createImagePacker();
     packer.packToData(bitmap, PACK_OPTIONS)
       .then((data: ArrayBuffer) => {
+        if (generation !== PosterCache.generation) { return; }
         try {
           fs.mkdirSync(PosterCache.diskDir, true);
           const path = PosterCache.diskPath(url);

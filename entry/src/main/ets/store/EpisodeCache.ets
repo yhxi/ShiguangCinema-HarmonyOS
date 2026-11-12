@@ -11,7 +11,8 @@
  * 失效条件（任一命中就重新拉取，绝不拿旧数据硬套）：
  *   · 超过 7 天
  *   · 当前正在播的地址不在缓存列表里（片源换线路了）
- *   · 首集地址对不上（整季换了版本）
+ *   · 缓存自身首末集与列表不一致（数据损坏）
+ * 网络刷新成功时详情页会替换缓存；离线时旧地址可能失效。
  *
  * 为什么落文件而不是 preferences：一季上千条 URL，40 部就是数 MB，
  * preferences 的字符串值撑不住这个量级。
@@ -48,7 +49,7 @@ export function episodeRecordUsable(record: EpisodeRecord | undefined, currentUr
   if (now - record.ts >= EPISODE_CACHE_TTL_MS) {
     return false;
   }
-  if (record.first !== record.urls[0]) {
+  if (record.first !== record.urls[0] || record.last !== record.urls[record.urls.length - 1]) {
     return false;
   }
   if (currentUrl !== '' && record.urls.indexOf(currentUrl) < 0) {
@@ -147,15 +148,17 @@ export class EpisodeCache {
     if (!episodeRecordUsable(record, currentUrl, Date.now())) {
       return null;
     }
-    return (record as EpisodeRecord).urls;
+    return (record as EpisodeRecord).urls.slice();
   }
 
   /** 写入缓存；只有一集的不写（多半是详情接口只回了半截） */
   static put(context: Context, server: string, sourceUrl: string, vodId: string, urls: string[]): void {
-    if (vodId === '' || urls.length <= 1) {
+    if (vodId === '') { return; }
+    const records = EpisodeCache.ensure(context);
+    if (urls.length <= 1) {
+      if (records.delete(episodeCacheKey(server, sourceUrl, vodId))) { EpisodeCache.scheduleWrite(); }
       return;
     }
-    const records = EpisodeCache.ensure(context);
     const record: EpisodeRecord = {
       urls: urls.slice(0),
       ts: Date.now(),

@@ -4,16 +4,16 @@
 [yhxi/ShiguangCinema-Android-TV](https://github.com/yhxi/ShiguangCinema-Android-TV)。
 
 连接 LibreTV 服务端后即可搜索、点播、看直播，本地保存观看历史与收藏。
-版本节奏与 Android 版同步：本包为 **1.5.5.2**，在 Android TV v1.5.5 的功能面之上
+版本节奏与 Android 版同步：本包为 **1.5.5.3**，在 Android TV v1.5.5 的功能面之上
 补齐了搜索分组/拼音首字母/选集缓存等差异项，并新增片源批量导入、内存监控与直播默认播 CCTV1。
 
 ## 安装包
 
-仓库根目录的 `ShiguangCinema-HarmonyOS-v1.5.5.2-unsigned.hap` 是**未签名**构建，
+仓库根目录的 `ShiguangCinema-HarmonyOS-v1.5.5.3-unsigned.hap` 是**未签名**构建，
 需要自行签名后才能装到设备上（见下方「签名」）。
 
 - bundleName：`com.lshai.shiguangcinema`
-- versionName：`1.5.5.2` / versionCode：`10157`
+- versionName：`1.5.5.3` / versionCode：`10158`
   （规则：`major*10000 + minor*100 + patch`，第四段按增量递增）
 - deviceTypes：`phone`
 
@@ -30,7 +30,7 @@
   标「N 个源」，默认用最健康的源，卡片右侧「换源」可选其他采集站）；完全同名的排前面，
   先到的结果不会被后到的打乱；一条没搜到时自动去掉「（2023）」「：副标题」这类噪声再搜一轮；
   最近 12 条搜索历史可复用；输入联想支持拼音首字母（「cjqc」→《超级汽车》）
-- 详情：选集、续播、收藏、加入儿童计时；选集列表落盘缓存 7 天（首末集地址校验），
+- 详情：选集、续播、收藏、加入儿童计时；选集列表落盘缓存 7 天，联网后刷新，失败时提示缓存可能过期，
   上千集的剧二次进入直接铺选集，选集按 100 集分段，不会一次铺满一千个格子；
   简介自动去掉 `<p>`/`&nbsp;` 等采集站标记
 - 播放：横屏、进度条、上下集、选集、倍速、画面比例、换源；
@@ -72,11 +72,7 @@ $env:DEVECO_SDK_HOME='E:\Development\command-line-tools\sdk'
 `tests/*.cjs` 是 node 侧的逻辑复刻测试（把 `.ets` 用 SDK 里的 typescript 转译后在 vm 里跑）：
 
 ```cmd
-node tests\children-live.test.cjs
-node tests\search-text.test.cjs
-node tests\play-urls.test.cjs
-node tests\playback-settings.test.cjs
-node tests\video-layout.test.cjs
+node --test tests\*.test.cjs
 ```
 
 ## 签名
@@ -115,6 +111,15 @@ sign-hap.cmd
 - 混合榜单的「部分榜单先显示」（v1.5.2）：鸿蒙侧仍是服务端一次返回后整体渲染。
 
 ## 变更记录
+
+### v1.5.5.3
+
+- 修复搜索时对同一批服务端片源的重复请求。
+- 修复海报加载并发控制与清缓存时的请求竞态。
+- 选集缓存联网刷新失败时提示缓存可能过期；修复缓存失效处理。
+- 儿童额度按播放时间结算，并将额度状态顺序保存为快照。
+- 直播增加切台释放超时及首帧超时后的备用线路处理。
+- 内存监控聚焦应用内存，后台采样进程指标并改进指标说明与失败显示。
 
 ### v1.5.5.2
 

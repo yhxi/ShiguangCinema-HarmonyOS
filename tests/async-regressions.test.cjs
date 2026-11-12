@@ -1,0 +1,75 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const vm = require('node:vm');
+const ts = require('E:/Development/command-line-tools/sdk/default/openharmony/ets/build-tools/ets-loader/node_modules/typescript');
+function load(src, requireFn) {
+  const js = ts.transpileModule(src, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 } }).outputText;
+  const ctx = { exports: {}, require: requireFn || (() => ({})), console, setTimeout, clearTimeout };
+  vm.runInNewContext(js, ctx); return ctx.exports;
+}
+const tick = () => new Promise(resolve => setImmediate(resolve));
+
+test('poster cache reserves six slots and old completions cannot poison new requests', async () => {
+  let source = fs.readFileSync('entry/src/main/ets/components/PosterImage.ets', 'utf8');
+  source = source.slice(0, source.indexOf('export function clearPosterCache')) + '\nexport { PosterCache };';
+  const { PosterCache: cache } = load(source, name => name === '@kit.ImageKit' ? { image: {} } : {});
+  let active = 0, peak = 0;
+  const pending = [];
+  cache.readDisk = async () => null;
+  cache.fetch = async () => {
+    active++; peak = Math.max(peak, active);
+    return new Promise(resolve => pending.push(() => { active--; resolve({}); }));
+  };
+  cache.writeDisk = () => {};
+  const context = { filesDir: 'fake' };
+  const jobs = Array.from({length: 15}, (_, i) => cache.get(context, `url${i}`, '', ''));
+  await tick();
+  assert.equal(active, 6); assert.equal(peak, 6);
+  cache.clear();
+  const newJob = cache.get(context, 'new', '', '');
+  while (pending.length) { pending.shift()(); await tick(); }
+  await Promise.all([...jobs, newJob]);
+  assert.ok(peak <= 6);
+  assert.equal(cache.failures.size, 0);
+});
+
+test('children quota migrates legacy data and serializes complete snapshots', async () => {
+  const source = fs.readFileSync('entry/src/main/ets/store/ChildrenQuota.ets', 'utf8');
+  const quota = load(source, name => name.includes('ChildrenCatalog') ? { ChildrenCatalog: { allTitles: () => [] } } : {});
+  const today = new Date();
+  const day = `${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,'0')}-${String(today.getDate()).padStart(2,'0')}`;
+  const values = {childrenUsedDay: day, childrenUsedMs: '6000', childrenBonusMs: '0', childrenLimitMinutes: '15'};
+  const writes = [];
+  const waits = [];
+  const prefs = { getRaw: (k, d) => values[k] ?? d, getStringList: () => [],
+    putRaw: (key, value) => new Promise(resolve => { writes.push(JSON.parse(value)); waits.push(resolve); }) };
+  const q = await quota.ChildrenQuota.get(prefs);
+  assert.equal(q.usedTodayMs(), 6000);
+  q.consume(5000);
+  const updated = q.setDailyMinutes(20);
+  await tick();
+  assert.equal(writes.length, 1); assert.equal(writes[0].usedMs, 11000); assert.equal(writes[0].limitMinutes, 15);
+  waits.shift()(); await tick();
+  assert.equal(writes.length, 2); assert.equal(writes[1].limitMinutes, 20); assert.equal(writes[1].usedMs, 11000);
+  waits.shift()(); await updated;
+});
+
+test('search queries initial server sources once and retries only failures', async () => {
+  const src = fs.readFileSync('entry/src/main/ets/pages/Search.ets', 'utf8');
+  const start = src.indexOf('  private async runSearch(');
+  const end = src.indexOf('\n  /**', start);
+  const method = src.slice(start, end).replace('private async runSearch', 'async runSearch');
+  const { SearchHarness } = load(`export class SearchHarness { ${method} }`);
+  const calls = [];
+  const h = new SearchHarness();
+  h.searchGeneration = 1; h.groups = []; h.applyIncoming = () => {};
+  h.session = {
+    enabledSources: () => [{url: 'server'}, {url: 'direct-ok'}, {url: 'direct-fail'}],
+    directCms: { shouldTryDirect: s => s.url.startsWith('direct'),
+      search: async s => { if (s.url === 'direct-fail') throw new Error('offline'); return []; } },
+    api: { search: async (_, sources) => { calls.push(sources.map(s => s.url)); return {items: []}; } }
+  };
+  await h.runSearch('test', 1);
+  assert.equal(JSON.stringify(calls), JSON.stringify([['server'], ['direct-fail']]));
+});

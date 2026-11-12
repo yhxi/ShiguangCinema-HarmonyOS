@@ -90,6 +90,7 @@ const now = Date.now();
 const good = { urls: ['u1', 'u2', 'u3'], ts: now, first: 'u1', last: 'u3' };
 assert.equal(episode.episodeRecordUsable(good, '', now), true);
 assert.equal(episode.episodeRecordUsable(good, 'u2', now), true);
+assert.equal(episode.episodeRecordUsable({ ...good, last: 'wrong' }, '', now), false);
 // 正在播的地址不在列表里 = 片源换了线路，缓存作废
 assert.equal(episode.episodeRecordUsable(good, 'u9', now), false);
 // 超过 7 天
