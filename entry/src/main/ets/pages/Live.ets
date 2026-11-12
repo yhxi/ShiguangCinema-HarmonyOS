@@ -25,6 +25,57 @@ interface ChannelGroup {
   channels: Channel[];
 }
 
+/** 单组最多先铺这么多频道，剩下的折叠起来，避免一次铺几千个可点区域 */
+const VISIBLE_CHIPS = 48;
+
+/**
+ * 分组列表的 LazyForEach 数据源。
+ * 本地导入的 m3u 动辄几百上千个频道，用 ForEach 会一次性把它们全建出来，
+ * 首屏要等所有节点挂完才显示；改成懒加载后只建屏幕上的那几组。
+ */
+class GroupSource implements IDataSource {
+  private groups: ChannelGroup[] = [];
+  private listeners: DataChangeListener[] = [];
+
+  setGroups(groups: ChannelGroup[]): void {
+    this.groups = groups;
+    for (const listener of this.listeners) {
+      listener.onDataReloaded();
+    }
+  }
+
+  totalCount(): number {
+    return this.groups.length;
+  }
+
+  getData(index: number): ChannelGroup {
+    return this.groups[index];
+  }
+
+  /** 收藏/展开这类局部变化，只刷新命中那一组 */
+  notifyChange(index: number): void {
+    if (index < 0 || index >= this.groups.length) {
+      return;
+    }
+    for (const listener of this.listeners) {
+      listener.onDataChange(index);
+    }
+  }
+
+  registerDataChangeListener(listener: DataChangeListener): void {
+    if (!this.listeners.includes(listener)) {
+      this.listeners.push(listener);
+    }
+  }
+
+  unregisterDataChangeListener(listener: DataChangeListener): void {
+    const idx = this.listeners.indexOf(listener);
+    if (idx >= 0) {
+      this.listeners.splice(idx, 1);
+    }
+  }
+}
+
 const MAX_IMPORT_BYTES = 4 * 1024 * 1024;
 
 @Entry
@@ -42,11 +93,14 @@ struct Live {
   @State showPaste: boolean = false;
   @State pasteText: string = '';
   @State favoriteCount: number = 0;
+  /** 展开过的分组名（只影响界面，不影响上下台顺序） */
+  @State expandedGroups: string[] = [];
 
   private session: Session = Session.getInstance();
   private prefs: Prefs | null = null;
   private channels: Channel[] = [];
   private favorites: Set<string> = new Set();
+  private groupSource: GroupSource = new GroupSource();
 
   aboutToAppear(): void {
     Prefs.get(getContext(this)).then(async (p: Prefs) => {
@@ -142,7 +196,41 @@ struct Live {
       return a.group.localeCompare(b.group);
     });
     this.filtered = groups;
+    this.groupSource.setGroups(groups);
     this.channelCount = this.channels.length;
+  }
+
+  private isExpanded(group: string): boolean {
+    return this.expandedGroups.includes(group);
+  }
+
+  /** 当前要铺出来的频道：没展开且组很大时只给前 VISIBLE_CHIPS 个 */
+  private visibleChips(g: ChannelGroup): Channel[] {
+    if (this.isExpanded(g.group) || g.channels.length <= VISIBLE_CHIPS) {
+      return g.channels;
+    }
+    return g.channels.slice(0, VISIBLE_CHIPS);
+  }
+
+  private collapsedCount(g: ChannelGroup): number {
+    if (this.isExpanded(g.group)) {
+      return 0;
+    }
+    return g.channels.length > VISIBLE_CHIPS ? g.channels.length - VISIBLE_CHIPS : 0;
+  }
+
+  /** 折叠组的展开/收起；只刷新这一组 */
+  private toggleExpand(group: string): void {
+    const next: string[] = this.isExpanded(group)
+      ? this.expandedGroups.filter((g: string) => g !== group)
+      : this.expandedGroups.concat([group]);
+    this.expandedGroups = next;
+    for (let i = 0; i < this.filtered.length; i++) {
+      if (this.filtered[i].group === group) {
+        this.groupSource.notifyChange(i);
+        break;
+      }
+    }
   }
 
   /** 传给播放器的完整频道表（顺序与页面一致，保证上下台连续） */
@@ -342,14 +430,14 @@ struct Live {
         }.layoutWeight(1).justifyContent(FlexAlign.Center).width('100%').padding(24)
       } else {
         List({ space: 10 }) {
-          ForEach(this.filtered, (g: ChannelGroup) => {
+          LazyForEach(this.groupSource, (g: ChannelGroup, index: number) => {
             ListItem() {
               Column({ space: 8 }) {
                 Text(`${g.group} · ${g.channels.length}`)
                   .fontSize(14).fontWeight(FontWeight.Bold).fontColor(Theme.ACCENT)
                   .width('100%')
                 Flex({ wrap: FlexWrap.Wrap }) {
-                  ForEach(g.channels, (ch: Channel) => {
+                  ForEach(this.visibleChips(g), (ch: Channel) => {
                     Row({ space: 6 }) {
                       if (ch.logo !== '') {
                         Image(ch.logo).width(24).height(24).borderRadius(4)
@@ -368,6 +456,19 @@ struct Live {
                     .onClick(() => { this.playAt(ch); })
                     .gesture(LongPressGesture().onAction(() => { this.toggleFavorite(ch); }))
                   }, (ch: Channel) => ch.url + ch.name)
+                  if (this.collapsedCount(g) > 0) {
+                    Text(`展开其余 ${this.collapsedCount(g)} 个`)
+                      .fontSize(13).fontColor(Theme.TILE_ICON)
+                      .padding({ left: 12, right: 12, top: 9, bottom: 9 })
+                      .margin(3).borderRadius(10).backgroundColor(Theme.TILE_SOFT)
+                      .onClick(() => { this.toggleExpand(g.group); })
+                  } else if (g.channels.length > VISIBLE_CHIPS) {
+                    Text('收起')
+                      .fontSize(13).fontColor(Theme.SECONDARY)
+                      .padding({ left: 12, right: 12, top: 9, bottom: 9 })
+                      .margin(3).borderRadius(10).backgroundColor(Theme.TINT)
+                      .onClick(() => { this.toggleExpand(g.group); })
+                  }
                 }.width('100%')
               }
               .padding(14).borderRadius(Theme.RADIUS_CARD).backgroundColor(Theme.PANEL)
@@ -378,6 +479,7 @@ struct Live {
         .layoutWeight(1)
         .width('100%')
         .padding({ left: 16, right: 16, bottom: 16 })
+        .cachedCount(2)
         .scrollBar(BarState.Off)
       }
     }

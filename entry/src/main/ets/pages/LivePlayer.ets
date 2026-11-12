@@ -21,6 +21,44 @@ import { LiveLocal } from '../store/LiveLocal';
 import { liveChannelKey, parseChannelHeaders, stepLiveChannel } from '../api/LivePlaylist';
 import { Theme } from '../common/Theme';
 
+/**
+ * 选频道列表的数据源（存的是频道下标）。
+ * 本地导入的列表可能有上千个频道，一次性全部建行会让浮层明显卡一下，
+ * 改成懒加载后只建浮层里看得见的那几行。
+ */
+class ChannelIndexSource implements IDataSource {
+  private items: number[] = [];
+  private listeners: DataChangeListener[] = [];
+
+  setItems(items: number[]): void {
+    this.items = items;
+    for (const listener of this.listeners) {
+      listener.onDataReloaded();
+    }
+  }
+
+  totalCount(): number {
+    return this.items.length;
+  }
+
+  getData(index: number): number {
+    return this.items[index];
+  }
+
+  registerDataChangeListener(listener: DataChangeListener): void {
+    if (!this.listeners.includes(listener)) {
+      this.listeners.push(listener);
+    }
+  }
+
+  unregisterDataChangeListener(listener: DataChangeListener): void {
+    const idx = this.listeners.indexOf(listener);
+    if (idx >= 0) {
+      this.listeners.splice(idx, 1);
+    }
+  }
+}
+
 @Entry
 @Component
 struct LivePlayer {
@@ -56,6 +94,7 @@ struct LivePlayer {
   private liveWindow: window.Window | null = null;
   private previousOrientation: window.Orientation = window.Orientation.UNSPECIFIED;
   private previousKeepScreenOn: boolean = false;
+  private channelSource: ChannelIndexSource = new ChannelIndexSource();
 
   aboutToAppear(): void {
     this.enterWindow();
@@ -68,6 +107,7 @@ struct LivePlayer {
     const start = parseInt(params['channelIndex'] ?? '0', 10);
     this.index = isNaN(start) || start < 0 || start >= this.urls.length ? 0 : start;
     this.title = this.names.length > this.index ? this.names[this.index] : '直播';
+    this.channelSource.setItems(this.filteredChannels());
     Prefs.get(getContext(this)).then((p: Prefs) => {
       this.prefs = p;
       this.favoriteKeys = Array.from(LiveLocal.favorites(p));
@@ -433,9 +473,12 @@ struct LivePlayer {
           TextInput({ placeholder: '搜索频道…', text: this.filterText })
             .fontSize(14).height(40).borderRadius(12).backgroundColor('#2A2A31')
             .fontColor('#FFFFFF').placeholderColor('#9AA5A0')
-            .onChange((v: string) => { this.filterText = v; })
+            .onChange((v: string) => {
+              this.filterText = v;
+              this.channelSource.setItems(this.filteredChannels());
+            })
           List({ space: 4 }) {
-            ForEach(this.filteredChannels(), (i: number) => {
+            LazyForEach(this.channelSource, (i: number) => {
               ListItem() {
                 Row() {
                   Text(i < this.names.length ? this.names[i] : `频道 ${i + 1}`)
@@ -450,7 +493,7 @@ struct LivePlayer {
                 .onClick(() => { this.selectChannel(i); })
               }
             }, (i: number) => i.toString())
-          }.layoutWeight(1).width('100%')
+          }.layoutWeight(1).width('100%').cachedCount(6)
         }.width('82%').height('78%').padding(16).borderRadius(16).backgroundColor('#EE202025')
       }
     }

@@ -10,7 +10,22 @@ import { Detail, SourceConfig } from '../api/Models';
 import { Prefs, WatchEntry, watchKey } from '../store/Prefs';
 import { Session } from '../store/Session';
 import { ChildrenQuota } from '../store/ChildrenQuota';
+import { PosterImage } from '../components/PosterImage';
 import { Theme } from '../common/Theme';
+
+/**
+ * 详情缓存（内存，10 分钟）：
+ *   从详情进播放页再返回、或同一部片从历史又点进来时，不必重新拉选集。
+ *   命中就先渲染缓存内容，同时后台静默重新拉一次（不显示 loading、不闪屏），
+ *   片源那边补了新集也能刷出来。
+ */
+interface DetailCacheEntry {
+  detail: Detail;
+  at: number;
+}
+
+const DETAIL_CACHE_TTL_MS = 10 * 60 * 1000;
+const DETAIL_CACHE: Map<string, DetailCacheEntry> = new Map();
 
 @Entry
 @Component
@@ -67,7 +82,16 @@ struct DetailPage {
           }
         }
       }
-      this.loadDetail();
+      const cacheKey = `${this.sourceUrl}|${this.vodId}`;
+      const cached = DETAIL_CACHE.get(cacheKey);
+      if (cached !== undefined && Date.now() - cached.at < DETAIL_CACHE_TTL_MS) {
+        this.applyDetail(cached.detail);
+        this.loading = false;
+        // 有缓存就后台静默校验，用户看到的始终是内容而不是转圈
+        this.loadDetail(true).catch(() => {});
+      } else {
+        this.loadDetail();
+      }
     });
   }
 
@@ -108,16 +132,19 @@ struct DetailPage {
     return fallback;
   }
 
-  private async loadDetail(): Promise<void> {
+  private async loadDetail(silent: boolean = false): Promise<void> {
     const api = this.session.api;
     const src = this.findSource();
     if (api === null || src === null) {
+      if (silent) { return; }
       this.loading = false;
       this.errorMsg = '会话已断开，请返回首页重新连接';
       return;
     }
-    this.loading = true;
-    this.errorMsg = '';
+    if (!silent) {
+      this.loading = true;
+      this.errorMsg = '';
+    }
     // 直连源优先，失败回退服务端（与 Android 版一致）
     const direct = this.session.directCms;
     try {
@@ -134,7 +161,8 @@ struct DetailPage {
       const d = await api.detail(this.vodId, src);
       this.applyDetail(d);
     } catch (e) {
-      this.errorMsg = (e as Error).message;
+      // 静默刷新失败就保留缓存内容，不弹错
+      if (!silent) { this.errorMsg = (e as Error).message; }
     } finally {
       this.loading = false;
     }
@@ -151,6 +179,7 @@ struct DetailPage {
       this.lastWatch.episodeIndex < d.episodes.length) {
       this.selected = this.lastWatch.episodeIndex;
     }
+    DETAIL_CACHE.set(`${this.sourceUrl}|${this.vodId}`, { detail: d, at: Date.now() });
     // 片名以详情为准，拿到后再判断是否受儿童额度管理
     this.refreshKidState().catch(() => {});
   }
@@ -258,9 +287,11 @@ struct DetailPage {
         Scroll() {
           Column({ space: 14 }) {
             Row({ space: 14 }) {
-              Image(this.proxyImg(this.info['cover']))
-                .width(108).height(158).borderRadius(12)
-                .objectFit(ImageFit.Cover).backgroundColor(Theme.PLACEHOLDER)
+              Stack() {
+                PosterImage({ url: this.info['cover'], proxy: this.proxyImg(this.info['cover']),
+                  cookie: this.session.api !== null ? this.session.api.currentCookie() : '',
+                  posterHeight: 158 })
+              }.width(108).height(158)
               Column({ space: 7 }) {
                 Text(this.info['title']).fontSize(21).fontWeight(FontWeight.Bold)
                   .fontColor(Theme.INK).maxLines(2)

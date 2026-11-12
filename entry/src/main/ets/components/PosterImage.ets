@@ -28,7 +28,11 @@ class PosterCache {
   private static failures: Map<string, number> = new Map();
   private static pending: Map<string, Promise<image.PixelMap | null>> = new Map();
   private static active: number = 0;
-  private static waiting: Array<() => void> = [];
+  /** 可见与预取分两条等待队列，取槽位时可见优先 */
+  private static visibleWaiting: Array<() => void> = [];
+  private static prefetchWaiting: Array<() => void> = [];
+  /** 每次清缓存 +1，在途请求据此自我作废 */
+  private static generation: number = 0;
   private static graveyard: GraveyardItem[] = [];
   private static diskDir: string = '';
   private static diskBroken: boolean = false;
@@ -42,13 +46,27 @@ class PosterCache {
   private static readonly GRAVEYARD_MS: number = 120000;
 
   static clear(): void {
+    PosterCache.generation++;
     PosterCache.images.clear();
     PosterCache.graveyard = [];
     PosterCache.failures.clear();
+    PosterCache.pending.clear();
+    // 唤醒所有排队者，它们会凭 generation 自行放弃，不会把旧结果写回来
+    const waiting = PosterCache.visibleWaiting.concat(PosterCache.prefetchWaiting);
+    PosterCache.visibleWaiting = [];
+    PosterCache.prefetchWaiting = [];
+    for (const resume of waiting) { resume(); }
     PosterCache.diskBroken = false;
   }
 
-  static async get(context: Context, url: string, proxy: string, cookie: string): Promise<image.PixelMap | null> {
+  /** 后台预热：不阻塞调用方，走预取队列（会让位给屏幕上的请求） */
+  static prefetch(context: Context, url: string, proxy: string, cookie: string): void {
+    if (url === '') { return; }
+    PosterCache.get(context, url, proxy, cookie, false).catch(() => {});
+  }
+
+  static async get(context: Context, url: string, proxy: string, cookie: string,
+    priority: boolean = true): Promise<image.PixelMap | null> {
     if (PosterCache.diskDir === '' && !PosterCache.diskBroken) {
       try { PosterCache.diskDir = `${context.filesDir}/poster-cache`; } catch (e) { PosterCache.diskBroken = true; }
     }
@@ -66,7 +84,7 @@ class PosterCache {
     PosterCache.failures.delete(pendingKey);
     const existing = PosterCache.pending.get(pendingKey);
     if (existing !== undefined) { return existing; }
-    const job = PosterCache.load(url, proxy, cookie);
+    const job = PosterCache.load(url, proxy, cookie, priority, PosterCache.generation);
     PosterCache.pending.set(pendingKey, job);
     try {
       const result = await job;
@@ -78,16 +96,37 @@ class PosterCache {
     } finally { PosterCache.pending.delete(pendingKey); }
   }
 
-  private static async load(url: string, proxy: string, cookie: string): Promise<image.PixelMap | null> {
-    if (PosterCache.active >= 6) {
-      await new Promise<void>((resolve: () => void) => { PosterCache.waiting.push(resolve); });
+  /** 取并发槽位；满了就按优先级排队 */
+  private static async acquire(priority: boolean): Promise<void> {
+    if (PosterCache.active < 6) {
+      return;
     }
+    await new Promise<void>((resolve: () => void) => {
+      if (priority) {
+        PosterCache.visibleWaiting.push(resolve);
+      } else {
+        PosterCache.prefetchWaiting.push(resolve);
+      }
+    });
+  }
+
+  private static releaseSlot(): void {
+    PosterCache.active--;
+    const next = PosterCache.visibleWaiting.length > 0 ? PosterCache.visibleWaiting.shift()
+      : PosterCache.prefetchWaiting.shift();
+    if (next !== undefined) { next(); }
+  }
+
+  private static async load(url: string, proxy: string, cookie: string,
+    priority: boolean, generation: number): Promise<image.PixelMap | null> {
+    await PosterCache.acquire(priority);
     PosterCache.active++;
     try {
+      if (generation !== PosterCache.generation) { return null; }
       // 1) 磁盘
       const fromDisk = await PosterCache.readDisk(url);
       if (fromDisk !== null) {
-        PosterCache.remember(url, fromDisk);
+        if (generation === PosterCache.generation) { PosterCache.remember(url, fromDisk); }
         return fromDisk;
       }
       // 2) 网络（直连失败再走代理）
@@ -96,15 +135,13 @@ class PosterCache {
       if (result === null && proxy !== '') {
         try { result = await PosterCache.fetch(proxy, true, cookie); } catch (e) { /* Leave placeholder. */ }
       }
-      if (result !== null) {
+      if (result !== null && generation === PosterCache.generation) {
         PosterCache.remember(url, result);
         PosterCache.writeDisk(url, result);
       }
       return result;
     } finally {
-      PosterCache.active--;
-      const next = PosterCache.waiting.shift();
-      if (next !== undefined) { next(); }
+      PosterCache.releaseSlot();
     }
   }
 
@@ -225,7 +262,8 @@ class PosterCache {
       }
       if (proxy && cookie !== '') { headers['Cookie'] = cookie; }
       const response = await request.request(url, {
-        method: http.RequestMethod.GET, header: headers, connectTimeout: 5000, readTimeout: 10000,
+        // 弱网下别让一张海报占着槽位十几秒：连不上就尽快失败，交给占位图
+        method: http.RequestMethod.GET, header: headers, connectTimeout: 3000, readTimeout: 7000,
         expectDataType: http.HttpDataType.ARRAY_BUFFER, maxLimit: 4 * 1024 * 1024
       });
       if (response.responseCode < 200 || response.responseCode >= 300 || !(response.result instanceof ArrayBuffer)) {

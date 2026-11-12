@@ -1,17 +1,45 @@
 import { RouteParams } from './RouteParams';
 /**
- * 片源管理页 —— 点播源 / 直播源两块：
- *   · 点播源：启用停用开关、自定义添加、删除、测速（走服务端 /api/source/test）、订阅导入
- *   · 直播源：M3U 订阅地址增删、切换当前使用的源
- * 与 Android 版 Prefs.kt 的「不同服务端分别保存」策略一致。
+ * 片源管理页 —— 点播源 / 直播源两块。
+ *
+ * 21 个内置源 + 用户自定义源之后，原来的「一个平面列表 + 逐个测速」已经不好用：
+ *   · 分不清哪些是内置、哪些是自己加的
+ *   · 想找某个源只能一路往下翻
+ *   · 测速结果只在内存里，退出就没了，下次进来还得再测一遍
+ *   · 批量操作只能「停用失败源」，不能按筛选结果批量启停
+ *
+ * 现在改为：
+ *   · 顶部统计（共 / 启用 / 可用 / 停用）+ 搜索 + 筛选（启用、停用、可用、不可用、内置、自定义）
+ *   · 检测全部并发 6 路，带进度；结果（可用性、条目数、延迟、时间）写入本地
+ *   · 重开页面先用上次结果标记状态，并显示「3 小时前检测」
+ *   · 批量：启用全部 / 停用全部（作用于当前筛选结果）、停用失败源、恢复内置源
+ *   · 列表默认可用优先，可切回原顺序
  */
 
-import { router } from '@kit.ArkUI';
-import { SourceConfig } from '../api/Models';
-import { Api, BUILT_IN_LIVE_SOURCES, liveSourceLabel, parseLiveFromExport, parseSourceList } from '../api/Api';
+import { promptAction, router } from '@kit.ArkUI';
+import { SourceConfig, builtInSources } from '../api/Models';
+import { BUILT_IN_LIVE_SOURCES, liveSourceLabel } from '../api/Api';
 import { Prefs } from '../store/Prefs';
 import { Session } from '../store/Session';
+import { HealthRecord, SourceHealth } from '../store/SourceHealth';
 import { Theme } from '../common/Theme';
+
+const TEST_CONCURRENCY = 6;
+
+interface FilterChip {
+  key: string;
+  label: string;
+}
+
+const CHIPS: FilterChip[] = [
+  { key: 'all', label: '全部' },
+  { key: 'on', label: '已启用' },
+  { key: 'off', label: '已停用' },
+  { key: 'ok', label: '可用' },
+  { key: 'bad', label: '不可用' },
+  { key: 'builtin', label: '内置' },
+  { key: 'custom', label: '自定义' }
+];
 
 @Entry
 @Component
@@ -20,11 +48,15 @@ struct SourceManage {
   @State sources: SourceConfig[] = [];
   @State liveList: string[] = [];
   @State liveSelected: number = 0;
-  @State testing: string = '';         // 正在测速的源 url
-  @State testResult: Map<string, string> = new Map();
+  @State testing: string = '';
+  /** url -> 健康记录；改动时整体替换以便触发刷新 */
+  @State health: Map<string, HealthRecord> = new Map();
   @State testingAll: boolean = false;
-  @State failedCount: number = 0;
-  private failedUrls: Set<string> = new Set();
+  @State progressDone: number = 0;
+  @State progressTotal: number = 0;
+  @State query: string = '';
+  @State filter: string = 'all';
+  @State sortByHealth: boolean = true;
   @State importing: boolean = false;
   @State msg: string = '';
   @State showAddDialog: boolean = false;
@@ -37,12 +69,25 @@ struct SourceManage {
 
   private session: Session = Session.getInstance();
   private prefs: Prefs | null = null;
+  private builtInUrls: Set<string> = new Set();
 
   aboutToAppear(): void {
+    for (const src of builtInSources()) {
+      this.builtInUrls.add(src.url);
+    }
     Prefs.get(getContext(this)).then(async (p: Prefs) => {
       this.prefs = p;
+      this.health = SourceHealth.load(p);
       await this.reload();
     });
+  }
+
+  /** 从扫码页或 Live 页返回时刷新，避免导入完了列表还是旧的 */
+  onPageShow(): void {
+    if (this.prefs === null || this.testingAll) {
+      return;
+    }
+    this.reload().catch(() => {});
   }
 
   private async reload(): Promise<void> {
@@ -51,7 +96,6 @@ struct SourceManage {
     }
     this.sources = await this.prefs.getSources(this.session.serverUrl);
     if (this.sources.length === 0) {
-      // 首次进入：把 Session 内存里的合并结果落盘
       this.sources = this.session.sources;
       await this.prefs.setSources(this.session.serverUrl, this.sources);
     }
@@ -72,6 +116,109 @@ struct SourceManage {
     }
   }
 
+  private async persistHealth(): Promise<void> {
+    if (this.prefs !== null) {
+      await SourceHealth.save(this.prefs, this.health);
+    }
+  }
+
+  private record(url: string, ok: boolean, count: number, ms: number, via: string): void {
+    const next = new Map(this.health);
+    const item: HealthRecord = { ok: ok, count: count, ms: ms, at: Date.now(), via: via };
+    next.set(url, item);
+    this.health = next;
+  }
+
+  // ------------------------------------------------------------ 列表与统计
+
+  private isBuiltIn(url: string): boolean {
+    return this.builtInUrls.has(url);
+  }
+
+  private matchesFilter(src: SourceConfig): boolean {
+    const h = this.health.get(src.url);
+    if (this.filter === 'on') { return src.enabled; }
+    if (this.filter === 'off') { return !src.enabled; }
+    if (this.filter === 'ok') { return h !== undefined && h.ok; }
+    if (this.filter === 'bad') { return h !== undefined && !h.ok; }
+    if (this.filter === 'builtin') { return this.isBuiltIn(src.url); }
+    if (this.filter === 'custom') { return !this.isBuiltIn(src.url); }
+    return true;
+  }
+
+  private matchesQuery(src: SourceConfig): boolean {
+    const kw = this.query.trim().toLowerCase();
+    if (kw === '') { return true; }
+    return src.name.toLowerCase().includes(kw) || src.url.toLowerCase().includes(kw);
+  }
+
+  /** 当前筛选 + 搜索命中的源；批量操作与渲染都用这一份，保证看到什么就操作什么 */
+  private visibleSources(): SourceConfig[] {
+    const out: SourceConfig[] = [];
+    for (const src of this.sources) {
+      if (this.matchesFilter(src) && this.matchesQuery(src)) {
+        out.push(src);
+      }
+    }
+    if (!this.sortByHealth) {
+      return out;
+    }
+    // 可用优先 → 未检测 → 不可用；同组内保持原顺序（Array.sort 在 JS 里已稳定）
+    return out.sort((a: SourceConfig, b: SourceConfig): number => {
+      return this.rank(a) - this.rank(b);
+    });
+  }
+
+  private rank(src: SourceConfig): number {
+    const h = this.health.get(src.url);
+    const healthRank = h === undefined ? 1 : (h.ok ? 0 : 2);
+    return healthRank * 2 + (src.enabled ? 0 : 1);
+  }
+
+  private enabledCount(): number {
+    let n = 0;
+    for (const src of this.sources) {
+      if (src.enabled) { n++; }
+    }
+    return n;
+  }
+
+  private okCount(): number {
+    let n = 0;
+    for (const src of this.sources) {
+      const h = this.health.get(src.url);
+      if (h !== undefined && h.ok) { n++; }
+    }
+    return n;
+  }
+
+  private badCount(): number {
+    let n = 0;
+    for (const src of this.sources) {
+      const h = this.health.get(src.url);
+      if (h !== undefined && !h.ok) { n++; }
+    }
+    return n;
+  }
+
+  private statusLine(src: SourceConfig): string {
+    const h = this.health.get(src.url);
+    if (h === undefined) {
+      return `未检测 · ${this.isBuiltIn(src.url) ? '内置' : '自定义'}`;
+    }
+    const head = h.ok ? `可用 · ${h.count} 条 · ${h.ms} ms` : '不可用';
+    const via = h.via === 'direct' ? '直连' : '服务端';
+    return `${head} · ${via} · ${SourceHealth.ageLabel(h)}`;
+  }
+
+  private statusColor(src: SourceConfig): string {
+    const h = this.health.get(src.url);
+    if (h === undefined) { return Theme.TERTIARY; }
+    return h.ok ? Theme.ACCENT : Theme.DANGER;
+  }
+
+  // ------------------------------------------------------------ 单个操作
+
   private async toggleSource(src: SourceConfig): Promise<void> {
     const out: SourceConfig[] = [];
     for (const s of this.sources) {
@@ -85,9 +232,183 @@ struct SourceManage {
     await this.persistSources();
   }
 
+  /** 删除：内置源属于「可恢复」的资源，先确认再删，避免误触 */
   private async removeSource(src: SourceConfig): Promise<void> {
+    const builtIn = this.isBuiltIn(src.url);
+    const result = await promptAction.showDialog({
+      title: builtIn ? '删除内置源？' : '删除这个源？',
+      message: builtIn
+        ? `《${src.name}》是内置源。删除后可以用「恢复内置源」一键加回来。`
+        : `《${src.name}》将从列表移除，之后不再参与搜索。`,
+      buttons: [{ text: '取消', color: Theme.INK }, { text: '删除', color: Theme.DANGER }]
+    });
+    if (result.index !== 1) {
+      return;
+    }
     this.sources = this.sources.filter((s: SourceConfig) => s.url !== src.url);
     await this.persistSources();
+    this.msg = `已删除 ${src.name}`;
+  }
+
+  private async testSource(src: SourceConfig): Promise<void> {
+    const api = this.session.api;
+    if (api === null || this.testing !== '' || this.testingAll) {
+      return;
+    }
+    this.testing = src.url;
+    const started = Date.now();
+    try {
+      if (this.session.directCms.shouldTryDirect(src)) {
+        try {
+          const list = await this.session.directCms.search(src, '');
+          this.record(src.url, true, list.length, Date.now() - started, 'direct');
+          await this.persistHealth();
+          this.msg = `${src.name} 直连可用 · ${list.length} 条 · ${Date.now() - started} ms`;
+          return;
+        } catch (e) {
+          // 直连失败再问服务端，别急着判死
+        }
+      }
+      const tested = await api.testSource(src.url);
+      this.record(src.url, tested[0], tested[1], Date.now() - started, 'server');
+      await this.persistHealth();
+      this.msg = tested[0]
+        ? `${src.name} 服务端可用 · ${tested[1]} 条 · ${Date.now() - started} ms`
+        : `${src.name} 不可用`;
+    } catch (e) {
+      this.record(src.url, false, 0, Date.now() - started, 'server');
+      await this.persistHealth();
+      this.msg = `${src.name} 检测不确定（网络或服务端异常）`;
+    } finally {
+      this.testing = '';
+    }
+  }
+
+  // ------------------------------------------------------------ 批量操作
+
+  /** 检测全部：并发 6 路，带进度；中途退出页面不写坏数据（结果逐条落盘） */
+  private async testAllSources(): Promise<void> {
+    const api = this.session.api;
+    if (api === null || this.testingAll || this.sources.length === 0) {
+      return;
+    }
+    this.testingAll = true;
+    const candidates = this.sources.slice();
+    this.progressTotal = candidates.length;
+    this.progressDone = 0;
+    this.msg = `开始检测 ${candidates.length} 个源…`;
+    let next = 0;
+    let ok = 0;
+    let bad = 0;
+    const run = async (): Promise<void> => {
+      while (next < candidates.length) {
+        const src = candidates[next++];
+        const started = Date.now();
+        let done = false;
+        if (this.session.directCms.shouldTryDirect(src)) {
+          try {
+            const list = await this.session.directCms.search(src, '');
+            this.record(src.url, true, list.length, Date.now() - started, 'direct');
+            done = true;
+            ok++;
+          } catch (e) {
+            // 交给服务端兜底
+          }
+        }
+        if (!done) {
+          try {
+            const tested = await api.testSource(src.url);
+            this.record(src.url, tested[0], tested[1], Date.now() - started, 'server');
+            if (tested[0]) { ok++; } else { bad++; }
+          } catch (e) {
+            this.record(src.url, false, 0, Date.now() - started, 'server');
+            bad++;
+          }
+        }
+        this.progressDone++;
+        this.msg = `检测中 ${this.progressDone}/${this.progressTotal} · 可用 ${ok} · 不可用 ${bad}`;
+        if (this.progressDone % 4 === 0) {
+          await this.persistHealth();
+        }
+      }
+    };
+    try {
+      const workers: Promise<void>[] = [];
+      for (let i = 0; i < TEST_CONCURRENCY; i++) {
+        workers.push(run());
+      }
+      await Promise.all(workers);
+      await this.persistHealth();
+      this.msg = `检测完成 · 可用 ${ok} · 不可用 ${bad} · 共 ${this.progressTotal}`;
+    } finally {
+      this.testingAll = false;
+    }
+  }
+
+  /** 批量启停：作用于当前筛选结果，符合「看到什么就操作什么」 */
+  private async setVisibleEnabled(enabled: boolean): Promise<void> {
+    const target: Set<string> = new Set();
+    for (const src of this.visibleSources()) {
+      target.add(src.url);
+    }
+    if (target.size === 0) {
+      this.msg = '当前筛选结果为空';
+      return;
+    }
+    let changed = 0;
+    this.sources = this.sources.map((src: SourceConfig): SourceConfig => {
+      if (target.has(src.url) && src.enabled !== enabled) {
+        changed++;
+        return { name: src.name, url: src.url, detail: src.detail, isAdult: src.isAdult, enabled: enabled };
+      }
+      return src;
+    });
+    await this.persistSources();
+    this.msg = `${enabled ? '已启用' : '已停用'} ${changed} 个源（当前筛选）`;
+  }
+
+  private async disableFailedSources(): Promise<void> {
+    if (this.testingAll) {
+      return;
+    }
+    let count = 0;
+    this.sources = this.sources.map((src: SourceConfig): SourceConfig => {
+      const h = this.health.get(src.url);
+      if (src.enabled && h !== undefined && !h.ok) {
+        count++;
+        return { name: src.name, url: src.url, detail: src.detail, isAdult: src.isAdult, enabled: false };
+      }
+      return src;
+    });
+    if (count === 0) {
+      this.msg = '没有已知不可用的启用源；先点「检测全部」';
+      return;
+    }
+    await this.persistSources();
+    this.msg = `已停用 ${count} 个不可用源；可随时手动启用`;
+  }
+
+  /** 按 URL 去重补回内置源，保留已有源的启停状态与自定义项 */
+  private async restoreBuiltIn(): Promise<void> {
+    const existing: Set<string> = new Set();
+    for (const src of this.sources) {
+      existing.add(src.url.replace(/\/+$/, ''));
+    }
+    const adding: SourceConfig[] = [];
+    for (const src of builtInSources()) {
+      const key = src.url.replace(/\/+$/, '');
+      if (!existing.has(key)) {
+        existing.add(key);
+        adding.push(src);
+      }
+    }
+    if (adding.length === 0) {
+      this.msg = '内置源已经齐了';
+      return;
+    }
+    this.sources = this.sources.concat(adding);
+    await this.persistSources();
+    this.msg = `已恢复 ${adding.length} 个内置源，共 ${this.sources.length} 个`;
   }
 
   private async addCustomSource(): Promise<void> {
@@ -108,80 +429,6 @@ struct SourceManage {
     this.addUrl = '';
     this.showAddDialog = false;
     this.msg = `已添加 ${name}`;
-  }
-
-  private async testSource(src: SourceConfig): Promise<void> {
-    const api = this.session.api;
-    if (api === null) {
-      return;
-    }
-    this.testing = src.url;
-    try {
-      const result = await api.testSource(src.url);
-      this.testResult.set(src.url, result[0] ? `可用 · ${result[1]} 条` : `不可用`);
-      this.msg = `${src.name} 测速完成`;
-    } catch (e) {
-      this.testResult.set(src.url, `测试失败`);
-    } finally {
-      this.testing = '';
-      this.testResult = new Map(this.testResult);
-    }
-  }
-
-  private async testAllSources(): Promise<void> {
-    const api = this.session.api;
-    if (api === null || this.testingAll || this.sources.length === 0) { return; }
-    this.testingAll = true;
-    this.failedUrls = new Set();
-    this.failedCount = 0;
-    this.testResult = new Map();
-    const candidates = this.sources.slice();
-    let next = 0;
-    let completed = 0;
-    let unknown = 0;
-    const run = async (): Promise<void> => {
-      while (next < candidates.length) {
-        const src = candidates[next++];
-        let result = '';
-        if (this.session.directCms.shouldTryDirect(src)) {
-          try {
-            const list = await this.session.directCms.search(src, '');
-            result = `直连可用 · ${list.length} 条`;
-          } catch (e) { /* Ask the server before considering the source unavailable. */ }
-        }
-        if (result === '') {
-          try {
-            const tested = await api.testSource(src.url);
-            if (tested[0]) { result = `服务端可用 · ${tested[1]} 条`; }
-            else { result = '不可用'; this.failedUrls.add(src.url); }
-          } catch (e) { result = '检测不确定'; unknown++; }
-        }
-        this.testResult.set(src.url, result);
-        this.testResult = new Map(this.testResult);
-        completed++;
-        this.msg = `检测 ${completed}/${candidates.length} · 失败 ${this.failedUrls.size} · 不确定 ${unknown}`;
-      }
-    };
-    try {
-      await Promise.all([run(), run(), run(), run()]);
-      this.failedCount = this.failedUrls.size;
-    } finally { this.testingAll = false; }
-  }
-
-  private async disableFailedSources(): Promise<void> {
-    if (this.testingAll || this.failedUrls.size === 0) { return; }
-    let count = 0;
-    this.sources = this.sources.map((src: SourceConfig): SourceConfig => {
-      if (src.enabled && this.failedUrls.has(src.url)) {
-        count++;
-        return { name: src.name, url: src.url, detail: src.detail, isAdult: src.isAdult, enabled: false };
-      }
-      return src;
-    });
-    try {
-      await this.persistSources();
-      this.msg = `已停用 ${count} 个失败源；可随时手动启用`;
-    } catch (e) { this.msg = `保存失败：${(e as Error).message}`; }
   }
 
   private async importSubscription(): Promise<void> {
@@ -218,41 +465,7 @@ struct SourceManage {
     }
   }
 
-  private async importFromScanResult(text: string): Promise<void> {
-    // 与 Android 版一致：扫码内容可能是订阅链接或导出文件文本
-    const trimmed = text.trim();
-    if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
-      const api = this.session.api;
-      if (api === null) {
-        return;
-      }
-      this.importing = true;
-      this.msg = '扫码导入中…';
-      try {
-        const list = await api.importSourceList(trimmed);
-        const existing = new Set<string>(this.sources.map((s: SourceConfig) => s.url));
-        const fresh: SourceConfig[] = list.filter((s: SourceConfig) => !existing.has(s.url));
-        this.sources = this.sources.concat(fresh);
-        await this.persistSources();
-        // 导出文件里若带直播订阅也一并收下
-        const lives = parseLiveFromExport(trimmed);
-        this.msg = `扫码导入：新增 ${fresh.length} 条点播源` + (lives.length > 0 ? `，${lives.length} 条直播订阅` : '');
-      } catch (e) {
-        this.msg = `扫码导入失败：${(e as Error).message}`;
-      } finally {
-        this.importing = false;
-      }
-    } else if (trimmed.includes('sources') || trimmed.includes('sites')) {
-      const list = parseSourceList(trimmed);
-      const existing = new Set<string>(this.sources.map((s: SourceConfig) => s.url));
-      const fresh: SourceConfig[] = list.filter((s: SourceConfig) => !existing.has(s.url));
-      this.sources = this.sources.concat(fresh);
-      await this.persistSources();
-      this.msg = `文本解析导入：新增 ${fresh.length} 条`;
-    } else {
-      this.msg = '二维码内容无法识别为片源';
-    }
-  }
+  // ------------------------------------------------------------ 直播源
 
   private async addLiveSource(): Promise<void> {
     const url = this.liveUrl.trim();
@@ -289,6 +502,8 @@ struct SourceManage {
       await this.prefs.setLiveSources(this.session.serverUrl, this.liveList, this.liveSelected);
     }
   }
+
+  // ------------------------------------------------------------ 弹窗
 
   @Builder
   addSourceDialog() {
@@ -360,6 +575,63 @@ struct SourceManage {
     .border({ width: 1, color: Theme.BORDER })
   }
 
+  @Builder
+  chip(key: string, label: string) {
+    Text(label).fontSize(12).height(30).padding({ left: 11, right: 11 })
+      .borderRadius(15)
+      .fontColor(this.filter === key ? Theme.ON_ACCENT : Theme.TILE_ICON)
+      .backgroundColor(this.filter === key ? Theme.ACCENT : Theme.TILE_SOFT)
+      .textAlign(TextAlign.Center)
+      .onClick(() => { this.filter = key; })
+  }
+
+  @Builder
+  sourceRow(src: SourceConfig) {
+    Column({ space: 5 }) {
+      Row({ space: 6 }) {
+        Text(src.name).fontSize(14).fontWeight(FontWeight.Medium)
+          .fontColor(src.enabled ? Theme.INK : Theme.TERTIARY)
+          .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+          .constraintSize({ maxWidth: '44%' })
+        Text(this.isBuiltIn(src.url) ? '内置' : '自定义').fontSize(9)
+          .fontColor(this.isBuiltIn(src.url) ? Theme.ACCENT : '#7A6A2F')
+          .padding({ left: 5, right: 5, top: 2, bottom: 2 })
+          .borderRadius(6)
+          .backgroundColor(this.isBuiltIn(src.url) ? Theme.TINT : '#FBF3D9')
+        if (this.session.directCms.shouldTryDirect(src)) {
+          Text('直连').fontSize(9).fontColor(Theme.ON_ACCENT_SOFT)
+            .padding({ left: 5, right: 5, top: 2, bottom: 2 })
+            .borderRadius(6).backgroundColor(Theme.TILE_ACTIVE)
+        }
+        Blank()
+        if (this.testing === src.url) {
+          LoadingProgress().width(16).height(16).color(Theme.ACCENT)
+        } else {
+          Text('测速').fontSize(12).fontColor(Theme.ACCENT).padding({ left: 6, right: 6, top: 4, bottom: 4 })
+            .onClick(() => { this.testSource(src); })
+        }
+        Toggle({ type: ToggleType.Switch, isOn: src.enabled })
+          .selectedColor(Theme.ACCENT)
+          .width(40).height(22)
+          .onChange(() => { this.toggleSource(src); })
+      }.width('100%')
+
+      Text(src.url).fontSize(10).fontColor(Theme.TERTIARY).maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%')
+
+      Row() {
+        Text(this.statusLine(src)).fontSize(10).fontColor(this.statusColor(src)).layoutWeight(1)
+          .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+        Text('删除').fontSize(11).fontColor(Theme.DANGER).padding({ left: 8, right: 2, top: 4, bottom: 2 })
+          .onClick(() => { this.removeSource(src); })
+      }.width('100%')
+    }
+    .width('100%').padding({ left: 12, right: 12, top: 10, bottom: 8 })
+    .borderRadius(Theme.RADIUS_ROW).backgroundColor(Theme.PANEL)
+    .border({ width: 1, color: this.isBuiltIn(src.url) ? Theme.BORDER : '#EDE6CF' })
+    .opacity(src.enabled ? 1 : 0.72)
+  }
+
   build() {
     Stack() {
       Column() {
@@ -370,17 +642,14 @@ struct SourceManage {
           Text('片源管理').fontSize(16).fontWeight(FontWeight.Bold).fontColor(Theme.INK)
           Blank()
           Button('扫码导入').fontSize(13).height(34).borderRadius(17)
-            .backgroundColor(Theme.PANEL).fontColor(Theme.ACCENT)
+            .backgroundColor(Theme.TILE_SOFT).fontColor(Theme.TILE_ICON)
             .onClick(() => {
-              router.pushUrl({
-                url: 'pages/Scan',
-                params: { mode: 'source' } as RouteParams
-              });
+              router.pushUrl({ url: 'pages/Scan', params: { mode: 'source' } as RouteParams });
             })
           Button('‹ 返回').fontSize(13).height(34).borderRadius(17)
-            .backgroundColor(Theme.PANEL).fontColor(Theme.INK)
+            .backgroundColor(Theme.TILE_SOFT).fontColor(Theme.TILE_ICON)
             .onClick(() => { router.back(); })
-        }.width('100%').padding({ left: 16, right: 16, top: 8, bottom: 10 })
+        }.width('100%').padding({ left: 16, right: 16, top: 8, bottom: 8 })
 
         Row({ space: 8 }) {
           Button('点播源').fontSize(13).height(36).borderRadius(18).layoutWeight(1)
@@ -391,81 +660,109 @@ struct SourceManage {
             .backgroundColor(this.tab === 1 ? Theme.ACCENT : Theme.PANEL)
             .fontColor(this.tab === 1 ? Theme.ON_ACCENT : Theme.SECONDARY)
             .onClick(() => { this.tab = 1; })
-        }
-        .width('100%').padding({ left: 16, right: 16, bottom: 8 })
-
-        if (this.msg !== '') {
-          Text(this.msg).fontSize(12).fontColor(Theme.SECONDARY)
-            .width('100%').padding({ left: 16, right: 16, bottom: 8 })
-            .maxLines(2)
-        }
+        }.width('100%').padding({ left: 16, right: 16, bottom: 8 })
 
         if (this.tab === 0) {
-          Row({ space: 8 }) {
-            Button('＋ 添加源').fontSize(13).height(38).borderRadius(12).layoutWeight(1)
-              .backgroundColor(Theme.PANEL).fontColor(Theme.INK)
-              .onClick(() => { this.showAddDialog = true; })
-            Button('订阅导入').fontSize(13).height(38).borderRadius(12).layoutWeight(1)
-              .backgroundColor(Theme.PANEL).fontColor(Theme.INK)
-              .onClick(() => { this.showSubDialog = true; })
+          // 统计条：一眼看清总量与可用情况
+          Row({ space: 12 }) {
+            Text(`共 ${this.sources.length}`).fontSize(11).fontColor(Theme.SECONDARY)
+            Text(`启用 ${this.enabledCount()}`).fontSize(11).fontColor(Theme.ACCENT)
+            Text(`可用 ${this.okCount()}`).fontSize(11).fontColor(Theme.ACCENT)
+            Text(`不可用 ${this.badCount()}`).fontSize(11)
+              .fontColor(this.badCount() > 0 ? Theme.DANGER : Theme.TERTIARY)
+            Blank()
+            Text(this.sortByHealth ? '可用优先' : '原顺序').fontSize(11).fontColor(Theme.ACCENT)
+              .padding({ left: 8, right: 8, top: 4, bottom: 4 })
+              .borderRadius(10).backgroundColor(Theme.TINT)
+              .onClick(() => { this.sortByHealth = !this.sortByHealth; })
           }.width('100%').padding({ left: 16, right: 16, bottom: 8 })
 
+          TextInput({ placeholder: '搜索名称或地址…', text: this.query })
+            .fontSize(14).height(42).borderRadius(12)
+            .backgroundColor(Theme.PANEL).fontColor(Theme.INK).placeholderColor(Theme.SECONDARY)
+            .margin({ left: 16, right: 16, bottom: 8 })
+            .onChange((v: string) => { this.query = v; })
+
+          Scroll() {
+            Row({ space: 6 }) {
+              ForEach(CHIPS, (c: FilterChip) => {
+                this.chip(c.key, c.label)
+              }, (c: FilterChip) => c.key)
+            }.padding({ left: 16, right: 16 })
+          }
+          .scrollable(ScrollDirection.Horizontal)
+          .scrollBar(BarState.Off)
+          .width('100%').margin({ bottom: 8 })
+
           Row({ space: 8 }) {
-            Button(this.testingAll ? '检测中…' : '检测全部').fontSize(13).height(38).borderRadius(12).layoutWeight(1)
+            Button(this.testingAll ? `检测中 ${this.progressDone}/${this.progressTotal}` : '检测全部')
+              .fontSize(13).height(38).borderRadius(12).layoutWeight(1)
               .backgroundColor(Theme.ACCENT).fontColor(Theme.ON_ACCENT)
               .enabled(!this.testingAll && this.testing === '' && this.sources.length > 0)
               .onClick(() => { this.testAllSources(); })
-            Button(`停用失败源 (${this.failedCount})`).fontSize(13).height(38).borderRadius(12).layoutWeight(1)
+            Button('停用失败源').fontSize(13).height(38).borderRadius(12).layoutWeight(1)
               .backgroundColor(Theme.PANEL).fontColor(Theme.INK)
-              .enabled(!this.testingAll && this.failedCount > 0)
+              .enabled(!this.testingAll && this.badCount() > 0)
               .onClick(() => { this.disableFailedSources(); })
+          }.width('100%').padding({ left: 16, right: 16, bottom: 6 })
+
+          if (this.testingAll && this.progressTotal > 0) {
+            Progress({ value: this.progressDone, total: this.progressTotal })
+              .width('100%').height(4).color(Theme.ACCENT)
+              .backgroundColor(Theme.TINT)
+              .padding({ left: 16, right: 16 }).margin({ bottom: 6 })
+          }
+
+          Row({ space: 8 }) {
+            Button('启用全部').fontSize(12).height(34).borderRadius(11).layoutWeight(1)
+              .backgroundColor(Theme.TILE_SOFT).fontColor(Theme.TILE_ICON)
+              .onClick(() => { this.setVisibleEnabled(true); })
+            Button('停用全部').fontSize(12).height(34).borderRadius(11).layoutWeight(1)
+              .backgroundColor(Theme.TILE_SOFT).fontColor(Theme.TILE_ICON)
+              .onClick(() => { this.setVisibleEnabled(false); })
+            Button('恢复内置源').fontSize(12).height(34).borderRadius(11).layoutWeight(1)
+              .backgroundColor(Theme.TILE_SOFT).fontColor(Theme.TILE_ICON)
+              .onClick(() => { this.restoreBuiltIn(); })
           }.width('100%').padding({ left: 16, right: 16, bottom: 8 })
 
-          List({ space: 7 }) {
-            ForEach(this.sources, (src: SourceConfig) => {
-              ListItem() {
-                Row({ space: 8 }) {
-                  Toggle({ type: ToggleType.Checkbox, isOn: src.enabled })
-                    .selectedColor(Theme.ACCENT)
-                    .onChange(() => { this.toggleSource(src); })
-                  Column({ space: 3 }) {
-                    Text(src.name).fontSize(14).fontWeight(FontWeight.Medium)
-                      .fontColor(src.enabled ? Theme.INK : Theme.TERTIARY)
-                      .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-                    Text(src.url).fontSize(10).fontColor(Theme.TERTIARY)
-                      .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-                    if (this.testResult.has(src.url)) {
-                      Text(this.testResult.get(src.url) ?? '')
-                        .fontSize(10).fontColor(this.testResult.get(src.url) === '不可用' ? Theme.DANGER :
-                          (this.testResult.get(src.url) === '检测不确定' ? '#B4761A' : Theme.ACCENT))
-                    }
-                  }.alignItems(HorizontalAlign.Start).layoutWeight(1)
-
-                  if (this.testing === src.url) {
-                    LoadingProgress().width(20).height(20).color(Theme.ACCENT)
-                  } else {
-                    Text('测速').fontSize(12).fontColor(Theme.ACCENT).padding(6)
-                      .onClick(() => { if (!this.testingAll) { this.testSource(src); } })
-                  }
-                  Text('删').fontSize(12).fontColor(Theme.DANGER).padding(6)
-                    .onClick(() => { this.removeSource(src); })
-                }
-                .width('100%').padding({ left: 12, right: 12, top: 10, bottom: 10 })
-                .borderRadius(Theme.RADIUS_ROW).backgroundColor(Theme.PANEL)
-                .border({ width: 1, color: Theme.BORDER })
-              }
-            }, (src: SourceConfig) => src.url + src.enabled.toString())
+          if (this.msg !== '') {
+            Text(this.msg).fontSize(11).fontColor(Theme.SECONDARY)
+              .width('100%').padding({ left: 16, right: 16, bottom: 6 })
+              .maxLines(2)
           }
-          .layoutWeight(1)
-          .width('100%')
-          .padding({ left: 16, right: 16, bottom: 16 })
-          .scrollBar(BarState.Off)
+
+          if (this.visibleSources().length === 0) {
+            Column({ space: 10 }) {
+              Text('当前筛选没有匹配的片源').fontSize(13).fontColor(Theme.SECONDARY)
+              Text('换个筛选或清空搜索词').fontSize(11).fontColor(Theme.TERTIARY)
+            }.layoutWeight(1).width('100%').justifyContent(FlexAlign.Center)
+          } else {
+            List({ space: 7 }) {
+              ForEach(this.visibleSources(), (src: SourceConfig) => {
+                ListItem() {
+                  this.sourceRow(src)
+                }
+              }, (src: SourceConfig) => src.url + src.enabled.toString() + this.rank(src).toString())
+            }
+            .layoutWeight(1)
+            .width('100%')
+            .padding({ left: 16, right: 16, bottom: 16 })
+            .scrollBar(BarState.Off)
+          }
         } else {
-          Row() {
-            Button('＋ 添加直播订阅').fontSize(13).height(38).borderRadius(12)
+          Row({ space: 8 }) {
+            Button('＋ 添加直播订阅').fontSize(13).height(38).borderRadius(12).layoutWeight(1)
               .backgroundColor(Theme.PANEL).fontColor(Theme.INK)
               .onClick(() => { this.showLiveDialog = true; })
+            Button('导入本地列表').fontSize(13).height(38).borderRadius(12).layoutWeight(1)
+              .backgroundColor(Theme.TILE_SOFT).fontColor(Theme.TILE_ICON)
+              .onClick(() => { router.pushUrl({ url: 'pages/Live' }); })
           }.width('100%').padding({ left: 16, right: 16, bottom: 8 })
+
+          if (this.msg !== '') {
+            Text(this.msg).fontSize(11).fontColor(Theme.SECONDARY)
+              .width('100%').padding({ left: 16, right: 16, bottom: 6 })
+          }
 
           List({ space: 7 }) {
             ForEach(this.liveList, (url: string, idx: number) => {
@@ -502,13 +799,19 @@ struct SourceManage {
       .backgroundColor(Theme.BG)
 
       if (this.showAddDialog) {
-        this.addSourceDialog()
+        Column() { this.addSourceDialog() }
+          .width('100%').height('100%').justifyContent(FlexAlign.Center)
+          .backgroundColor('#66000000')
       }
       if (this.showSubDialog) {
-        this.subImportDialog()
+        Column() { this.subImportDialog() }
+          .width('100%').height('100%').justifyContent(FlexAlign.Center)
+          .backgroundColor('#66000000')
       }
       if (this.showLiveDialog) {
-        this.addLiveDialog()
+        Column() { this.addLiveDialog() }
+          .width('100%').height('100%').justifyContent(FlexAlign.Center)
+          .backgroundColor('#66000000')
       }
     }
     .width('100%').height('100%')

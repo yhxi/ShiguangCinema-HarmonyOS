@@ -7,6 +7,8 @@ import { router } from '@kit.ArkUI';
 import { Prefs, WatchEntry } from '../store/Prefs';
 import { Session } from '../store/Session';
 import { Theme } from '../common/Theme';
+import { PosterImage } from '../components/PosterImage';
+import { EntrySource } from '../components/EntrySource';
 
 @Entry
 @Component
@@ -15,14 +17,20 @@ struct History {
 
   private session: Session = Session.getInstance();
   private prefs: Prefs | null = null;
+  private source: EntrySource = new EntrySource();
 
   aboutToAppear(): void {
     Prefs.get(getContext(this)).then((p: Prefs) => {
       this.prefs = p;
       p.getHistory().then((l: WatchEntry[]) => {
-        this.list = l;
+        this.setList(l);
       });
     });
+  }
+
+  private setList(l: WatchEntry[]): void {
+    this.list = l;
+    this.source.setItems(l);
   }
 
   private proxyImg(picUrl: string): string {
@@ -41,7 +49,7 @@ struct History {
       return;
     }
     this.prefs.removeWatch(key).then(() => {
-      this.list = this.list.filter((e: WatchEntry) => e.key !== key);
+      this.setList(this.list.filter((e: WatchEntry) => e.key !== key));
     });
   }
 
@@ -50,7 +58,7 @@ struct History {
       return;
     }
     this.prefs.clearHistory().then(() => {
-      this.list = [];
+      this.setList([]);
     });
   }
 
@@ -84,12 +92,16 @@ struct History {
         }.layoutWeight(1).justifyContent(FlexAlign.Center).width('100%')
       } else {
         List({ space: 9 }) {
-          ForEach(this.list, (e: WatchEntry) => {
+          LazyForEach(this.source, (e: WatchEntry) => {
             ListItem() {
               Row({ space: 12 }) {
-                Image(this.proxyImg(e.cover))
-                  .width(64).height(90).borderRadius(10)
-                  .objectFit(ImageFit.Cover).backgroundColor(Theme.PLACEHOLDER)
+                Stack() {
+                  PosterImage({
+                    url: e.cover, proxy: this.proxyImg(e.cover),
+                    cookie: this.session.api !== null ? this.session.api.currentCookie() : '',
+                    posterHeight: 90
+                  })
+                }.width(64).height(90)
                 Column({ space: 5 }) {
                   Text(e.title).fontSize(16).fontWeight(FontWeight.Bold).fontColor(Theme.INK)
                     .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -111,6 +123,7 @@ struct History {
         .layoutWeight(1)
         .width('100%')
         .padding({ left: 16, right: 16, bottom: 16 })
+        .cachedCount(4)
         .scrollBar(BarState.Off)
       }
     }

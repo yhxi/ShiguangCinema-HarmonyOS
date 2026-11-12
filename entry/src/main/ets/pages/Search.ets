@@ -8,6 +8,7 @@ import { router } from '@kit.ArkUI';
 import { SearchItem, SourceConfig } from '../api/Models';
 import { Session } from '../store/Session';
 import { Theme } from '../common/Theme';
+import { PosterImage } from '../components/PosterImage';
 
 @Entry
 @Component
@@ -33,11 +34,17 @@ struct SearchPage {
     }
     if (params !== undefined && params['keyword'] !== undefined) {
       this.keyword = params['keyword'];
-      this.doSearch();
+      // 同一个关键词刚刚搜过：先把结果铺上去，再后台刷新，避免整页空白等全源扫描
+      const cached = this.session.cachedSearch(this.keyword);
+      if (cached.length > 0) {
+        this.items = cached;
+        this.statusMsg = `共 ${cached.length} 条 · 上次结果，正在刷新`;
+      }
+      this.doSearch(cached.length > 0);
     }
   }
 
-  private async doSearch(): Promise<void> {
+  private async doSearch(keepExisting: boolean = false): Promise<void> {
     const kw = this.keyword.trim();
     const api = this.session.api;
     if (kw === '' || api === null) {
@@ -45,8 +52,10 @@ struct SearchPage {
     }
     const generation = ++this.searchGeneration;
     this.searching = true;
-    this.statusMsg = '搜索中…';
-    this.items = [];
+    if (!keepExisting) {
+      this.statusMsg = '搜索中…';
+      this.items = [];
+    }
     const fallback: SourceConfig[] = [];
     const direct: SourceConfig[] = [];
     for (const src of this.session.enabledSources()) {
@@ -72,7 +81,7 @@ struct SearchPage {
         }
       }
     };
-    await Promise.all([serverTask, run(), run(), run(), run()]);
+    await Promise.all([serverTask, run(), run(), run(), run(), run()]);
     if (generation !== this.searchGeneration) { return; }
     if (fallback.length > 0) {
       try {
@@ -108,6 +117,18 @@ struct SearchPage {
       }
     }
     this.items = this.items.concat(fresh);
+  }
+
+  /** 豆瓣图走服务端代理，图床直连 */
+  private posterProxy(pic: string): string {
+    const api = this.session.api;
+    if (api === null || pic === '') {
+      return '';
+    }
+    if (pic.includes('doubanio.com') || pic.includes('douban.com')) {
+      return api.imageUrl(pic);
+    }
+    return '';
   }
 
   private goDetail(item: SearchItem): void {
@@ -172,10 +193,11 @@ struct SearchPage {
           ForEach(this.items, (item: SearchItem) => {
             ListItem() {
               Row({ space: 12 }) {
-                Image(item.pic !== '' ? item.pic : '')
-                  .width(64).height(90).borderRadius(10)
-                  .objectFit(ImageFit.Cover)
-                  .backgroundColor(Theme.PLACEHOLDER)
+                Stack() {
+                  PosterImage({ url: item.pic, proxy: this.posterProxy(item.pic),
+                    cookie: this.session.api !== null ? this.session.api.currentCookie() : '',
+                    posterHeight: 90 })
+                }.width(64).height(90)
                 Column({ space: 5 }) {
                   Text(item.name).fontSize(16).fontWeight(FontWeight.Bold).fontColor(Theme.INK)
                     .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })

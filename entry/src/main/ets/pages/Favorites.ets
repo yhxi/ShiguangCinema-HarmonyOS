@@ -8,6 +8,8 @@ import { Prefs, WatchEntry } from '../store/Prefs';
 import { Session } from '../store/Session';
 import { SourceConfig } from '../api/Models';
 import { Theme } from '../common/Theme';
+import { PosterImage } from '../components/PosterImage';
+import { EntrySource } from '../components/EntrySource';
 
 @Entry
 @Component
@@ -19,14 +21,20 @@ struct Favorites {
 
   private session: Session = Session.getInstance();
   private prefs: Prefs | null = null;
+  private source: EntrySource = new EntrySource();
 
   aboutToAppear(): void {
     Prefs.get(getContext(this)).then((p: Prefs) => {
       this.prefs = p;
       p.getFavorites().then((l: WatchEntry[]) => {
-        this.list = l;
+        this.setList(l);
       });
     });
+  }
+
+  private setList(l: WatchEntry[]): void {
+    this.list = l;
+    this.source.setItems(l);
   }
 
   private proxyImg(picUrl: string): string {
@@ -45,7 +53,7 @@ struct Favorites {
       return;
     }
     this.prefs.toggleFavorite(e).then(() => {
-      this.list = this.list.filter((x: WatchEntry) => x.key !== e.key);
+      this.setList(this.list.filter((x: WatchEntry) => x.key !== e.key));
     });
   }
 
@@ -109,12 +117,16 @@ struct Favorites {
         }.layoutWeight(1).justifyContent(FlexAlign.Center).width('100%')
       } else {
         List({ space: 9 }) {
-          ForEach(this.list, (e: WatchEntry) => {
+          LazyForEach(this.source, (e: WatchEntry) => {
             ListItem() {
               Row({ space: 12 }) {
-                Image(this.proxyImg(e.cover))
-                  .width(64).height(90).borderRadius(10)
-                  .objectFit(ImageFit.Cover).backgroundColor(Theme.PLACEHOLDER)
+                Stack() {
+                  PosterImage({
+                    url: e.cover, proxy: this.proxyImg(e.cover),
+                    cookie: this.session.api !== null ? this.session.api.currentCookie() : '',
+                    posterHeight: 90
+                  })
+                }.width(64).height(90)
                 Column({ space: 5 }) {
                   Text(e.title).fontSize(16).fontWeight(FontWeight.Bold).fontColor(Theme.INK)
                     .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -143,6 +155,7 @@ struct Favorites {
         .layoutWeight(1)
         .width('100%')
         .padding({ left: 16, right: 16, bottom: 16 })
+        .cachedCount(4)
         .scrollBar(BarState.Off)
       }
     }

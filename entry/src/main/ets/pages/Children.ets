@@ -30,6 +30,45 @@ interface KidSection {
   age: string;
   title: string;
   cards: KidCard[];
+  source: KidCardSource;
+}
+
+/**
+ * 分区数据源：给 LazyForEach 用。
+ * 100 部动画如果一次性全部挂载，每个卡片都会立刻发起一次封面请求，
+ * 首屏既卡又慢；改用懒加载后只挂当前可见的几张，滑到哪加载到哪。
+ */
+class KidCardSource implements IDataSource {
+  private cards: KidCard[] = [];
+  private listeners: DataChangeListener[] = [];
+
+  setCards(cards: KidCard[]): void {
+    this.cards = cards;
+    for (const listener of this.listeners) {
+      listener.onDataReloaded();
+    }
+  }
+
+  totalCount(): number {
+    return this.cards.length;
+  }
+
+  getData(index: number): KidCard {
+    return this.cards[index];
+  }
+
+  registerDataChangeListener(listener: DataChangeListener): void {
+    if (!this.listeners.includes(listener)) {
+      this.listeners.push(listener);
+    }
+  }
+
+  unregisterDataChangeListener(listener: DataChangeListener): void {
+    const idx = this.listeners.indexOf(listener);
+    if (idx >= 0) {
+      this.listeners.splice(idx, 1);
+    }
+  }
 }
 
 @Entry
@@ -61,7 +100,9 @@ struct Children {
           const cover = ChildrenArtwork.firstUrl(ctx, title);
           cards.push({ title: title, cover: cover, hasArt: cover !== '' });
         }
-        list.push({ age: section.age, title: section.title, cards: cards });
+        const source = new KidCardSource();
+        source.setCards(cards);
+        list.push({ age: section.age, title: section.title, cards: cards, source: source });
       }
       this.sections = list;
     }).catch(() => {});
@@ -139,16 +180,18 @@ struct Children {
         Blank()
       }.width('100%')
 
-      Scroll() {
-        Row({ space: 12 }) {
-          ForEach(section.cards, (card: KidCard) => {
+      List({ space: 12 }) {
+        LazyForEach(section.source, (card: KidCard) => {
+          ListItem() {
             this.kidCard(card)
-          }, (card: KidCard) => card.title)
-        }.padding({ right: 8 })
+          }
+        }, (card: KidCard) => card.title)
       }
-      .scrollable(ScrollDirection.Horizontal)
+      .listDirection(Axis.Horizontal)
+      .cachedCount(4)
       .scrollBar(BarState.Off)
       .width('100%')
+      .height(212)
     }.width('100%').alignItems(HorizontalAlign.Start)
   }
 
