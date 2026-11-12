@@ -255,8 +255,13 @@ struct Children {
       .backgroundColor(Theme.KID_BG)
 
       if (this.showParent) {
-        Column() {
-          Blank()
+        // 遮罩与面板做成兄弟节点：点遮罩关闭，点面板不会冒泡到遮罩。
+        // 面板必须用 Default —— Block 会把子节点一起屏蔽，家长键盘就点不动了。
+        Stack({ alignContent: Alignment.Bottom }) {
+          Column()
+            .width('100%').height('100%')
+            .backgroundColor('#66000000')
+            .onClick(() => { this.showParent = false; })
           Column() {
             ParentPanel({
               quotaRef: this.quota,
@@ -265,14 +270,10 @@ struct Children {
             })
           }
           .width('100%')
-          // 面板自己吃掉点击，只有点面板外的暗色区域才关闭
-          .hitTestBehavior(HitTestMode.Block)
+          .padding(16)
+          .hitTestBehavior(HitTestMode.Default)
         }
         .width('100%').height('100%')
-        .justifyContent(FlexAlign.End)
-        .padding(16)
-        .backgroundColor('#66000000')
-        .onClick(() => { this.showParent = false; })
       }
     }
     .width('100%').height('100%')

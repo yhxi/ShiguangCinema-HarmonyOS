@@ -377,8 +377,7 @@ struct SearchPage {
   }
 
   private goDetail(item: SearchItem): void {
-    this.pickerTitle = '';
-    this.pickerItems = [];
+    this.closePicker();
     router.pushUrl({
       url: 'pages/Detail',
       params: {
@@ -403,6 +402,11 @@ struct SearchPage {
     }
     this.pickerTitle = g.title;
     this.pickerItems = g.items;
+  }
+
+  private closePicker(): void {
+    this.pickerTitle = '';
+    this.pickerItems = [];
   }
 
   /** 源的名字：搜索条目里带的 sourceName，没有就用域名兜底 */
@@ -523,8 +527,12 @@ struct SearchPage {
 
   @Builder
   pickerSheet() {
-    Column() {
-      Blank()
+    // 遮罩与面板做兄弟节点，面板用 Default（Block 会把面板里的行和按钮一起屏蔽）
+    Stack({ alignContent: Alignment.Bottom }) {
+      Column()
+        .width('100%').height('100%')
+        .backgroundColor('#66000000')
+        .onClick(() => { this.closePicker(); })
       Column({ space: 8 }) {
         Row() {
           Text(`《${this.pickerTitle}》`).fontSize(16).fontWeight(FontWeight.Bold)
@@ -554,16 +562,14 @@ struct SearchPage {
         .scrollBar(BarState.Off)
         Button('取消').fontSize(15).height(44).width('100%').borderRadius(22)
           .backgroundColor(Theme.BG).fontColor(Theme.INK)
-          .onClick(() => { this.pickerTitle = ''; this.pickerItems = []; })
+          .onClick(() => { this.closePicker(); })
       }
       .width('100%').padding(16)
       .borderRadius({ topLeft: 20, topRight: 20 })
       .backgroundColor(Theme.PANEL)
-      .hitTestBehavior(HitTestMode.Block)
+      .hitTestBehavior(HitTestMode.Default)
     }
     .width('100%').height('100%')
-    .justifyContent(FlexAlign.End)
-    .backgroundColor('#66000000')
   }
 
   build() {

@@ -503,17 +503,19 @@ struct Live {
     .backgroundColor(Theme.BG)
 
     if (this.showPaste) {
-      Column() {
-        Blank()
-        // 浮层自己吃掉点击，避免点面板空白就把面板关掉
+      // 遮罩与面板做兄弟节点，面板用 Default：子节点（输入框、按钮）可点，
+      // 同时挡住遮罩的点击，不会点一下面板就关掉。Block 会把子节点一起屏蔽。
+      Stack({ alignContent: Alignment.Bottom }) {
+        Column()
+          .width('100%').height('100%')
+          .backgroundColor('#66000000')
+          .onClick(() => { this.showPaste = false; })
         Column() { this.pasteSheet() }
           .width('100%').borderRadius(20)
           .backgroundColor(Theme.PANEL)
-          .hitTestBehavior(HitTestMode.Block)
+          .hitTestBehavior(HitTestMode.Default)
       }
       .width('100%').height('100%')
-      .justifyContent(FlexAlign.End)
-      .backgroundColor('#66000000')
     }
     }
     .width('100%').height('100%')
