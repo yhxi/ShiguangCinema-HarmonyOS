@@ -125,3 +125,49 @@ test('exhausted child quota blocks resume before invoking the player', () => {
   p.notify = () => {}; p.togglePlay(); assert.equal(played, 0);
   p.quota.isExhausted = () => false; p.scheduleHide = () => {}; p.togglePlay(); assert.equal(played, 1);
 });
+
+test('recent viewing resumes the exact episode and saved position from cache', async () => {
+  const source = fs.readFileSync('entry/src/main/ets/common/ResumePlayback.ets', 'utf8');
+  let networkCalls = 0;
+  const episodeCache = {get: () => ['first', 'second'], put: () => {}};
+  const { resumePlaybackParams } = load(source, name => name.includes('EpisodeCache') ? { EpisodeCache: episodeCache } : {});
+  const session = {serverUrl:'https://server', sources: [], api:{detail: async () => {networkCalls++;}}, directCms: {}};
+  const entry = {serverUrl:'https://server', sourceUrl:'https://source', vodId:'1', episodeIndex:1, positionMs:42420, title:'剧', cover:'pic'};
+  const p = await resumePlaybackParams({}, entry, session);
+  assert.equal(p.index, '1'); assert.equal(p.resumeMs, '42420'); assert.equal(p.forceResume, '1');
+  assert.deepEqual(JSON.parse(p.episodes), ['first', 'second']); assert.equal(networkCalls, 0);
+  session.serverUrl = 'https://other';
+  await assert.rejects(resumePlaybackParams({}, entry, session), /其他服务端/);
+});
+
+test('recent viewing fetches missing episodes and reports unavailable saved episode', async () => {
+  const source = fs.readFileSync('entry/src/main/ets/common/ResumePlayback.ets', 'utf8');
+  const episodeCache = {get: () => null, put: () => {}};
+  const { resumePlaybackParams } = load(source, name => name.includes('EpisodeCache') ? { EpisodeCache: episodeCache } : {});
+  const entry = {serverUrl:'s', sourceUrl:'src', vodId:'1', episodeIndex:1, positionMs:100, title:'剧', cover:''};
+  const session = {serverUrl:'s', sources:[{url:'src'}], directCms:{shouldTryDirect: () => true, detail: async () => {throw Error('unavailable');}},
+    api:{detail: async () => ({episodes:['first', 'second']})}};
+  const p = await resumePlaybackParams({}, entry, session);
+  assert.equal(p.index, '1'); assert.equal(p.resumeMs, '100');
+  session.api.detail = async () => ({episodes:['first']});
+  await assert.rejects(resumePlaybackParams({}, entry, session), /集数已不可用/);
+});
+
+test('search suggestions load separate movie, television and animation lists', async () => {
+  const src = fs.readFileSync('entry/src/main/ets/pages/Search.ets', 'utf8');
+  const a = src.indexOf('  private prepareHotSections():');
+  const b = src.indexOf('  @Builder', a);
+  const methods = src.slice(a, b).replaceAll('private ', '');
+  const prefix = "const ChildrenCatalog = { sections: () => [{ titles: ['小猪佩奇','汪汪队立大功','布鲁伊'] }] };\n";
+  const { HotHarness } = load(`${prefix}export class HotHarness { ${methods} }`);
+  const h = new HotHarness(); const requests = [];
+  h.origin = ''; h.active = true; h.hotGeneration = 0; h.hotSections = []; h.hotCacheWrites = Promise.resolve();
+  h.prefs = {getRecommendations: async () => [], setRecommendations: async () => {}};
+  h.session = {serverUrl:'server', api:{douban: async (type, tag) => { requests.push(`${type}|${tag}`); return [{title: `${type}-${tag}`, cover:'', rating:''}]; }}};
+  h.prepareHotSections(); h.loadHot(); await tick(); await tick();
+  assert.equal(JSON.stringify(requests.sort()), JSON.stringify(['movie|热门','tv|国产动画','tv|热门'].sort()));
+  assert.equal(h.hotSections.length, 4);
+  assert.equal(h.hotSections.find(s => s.key === 'kids').items[0].title, '小猪佩奇');
+  assert.equal(h.hotSections.find(s => s.key === 'movie').items[0].title, 'movie-热门');
+  h.toggleHot('movie'); assert.equal(h.hotSections.find(s => s.key === 'movie').expanded, true);
+});

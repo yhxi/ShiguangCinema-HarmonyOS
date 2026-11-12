@@ -11,11 +11,12 @@ import { RouteParams } from './RouteParams';
  */
 
 import { router } from '@kit.ArkUI';
-import { SearchItem, SourceConfig } from '../api/Models';
+import { SearchItem, SourceConfig, DoubanItem } from '../api/Models';
 import { Session } from '../store/Session';
 import { Prefs } from '../store/Prefs';
 import { SourceHealth, HealthRecord } from '../store/SourceHealth';
 import { PinyinInitials } from '../api/PinyinInitials';
+import { ChildrenCatalog } from '../api/ChildrenCatalog';
 import { cleanKeyword, matchesInitials, searchTitleRank } from '../common/TextClean';
 import { PosterImage } from '../components/PosterImage';
 import { Theme } from '../common/Theme';
@@ -25,6 +26,18 @@ interface SearchGroup {
   title: string;
   /** 同一部片名在各采集站的条目，第一个是默认打开的那个 */
   items: SearchItem[];
+}
+
+interface HotSection {
+  key: string;
+  title: string;
+  subtitle: string;
+  type: string;
+  tag: string;
+  items: DoubanItem[];
+  loading: boolean;
+  message: string;
+  expanded: boolean;
 }
 
 interface Suggestion {
@@ -90,6 +103,10 @@ struct SearchPage {
   @State origin: string = '';
   @State history: string[] = [];
   @State suggestions: Suggestion[] = [];
+  @State hotSections: HotSection[] = [];
+  private hotGeneration: number = 0;
+  private hotCacheWrites: Promise<void> = Promise.resolve();
+  private active: boolean = true;
   /** 选源浮层：非空时显示 */
   @State pickerTitle: string = '';
   @State pickerItems: SearchItem[] = [];
@@ -105,9 +122,15 @@ struct SearchPage {
   private pool: PoolEntry[] = [];
   private health: Map<string, HealthRecord> = new Map();
 
-  aboutToDisappear(): void { this.searchGeneration++; }
+  aboutToDisappear(): void { this.active = false; this.searchGeneration++; this.hotGeneration++; }
+
+  onPageShow(): void {
+    this.active = true;
+    if (this.hotSections.some((section: HotSection) => section.loading)) { this.loadHot(); }
+  }
 
   aboutToAppear(): void {
+    this.active = true;
     const params = router.getParams() as Record<string, string> | undefined;
     if (params !== undefined && params['fromChildren'] === '1') {
       this.origin = 'children';
@@ -118,7 +141,10 @@ struct SearchPage {
       this.prefs = p;
       this.health = SourceHealth.load(p);
       this.history = p.getSearchHistory();
+      this.prepareHotSections();
+      this.loadHot();
       await this.buildPool();
+      if (!this.active) { return; }
       if (params !== undefined && params['keyword'] !== undefined) {
         this.keyword = params['keyword'];
         // 先把关键词记成"已搜"，缓存结果才会按匹配权重排而不是按字母排
@@ -132,6 +158,122 @@ struct SearchPage {
         this.doSearch(cached.length > 0);
       }
     }).catch(() => {});
+  }
+
+  private prepareHotSections(): void {
+    const kids: DoubanItem[] = [];
+    for (const section of ChildrenCatalog.sections()) {
+      for (const title of section.titles.slice(0, 3)) { kids.push({ title: title, cover: '', rating: '' }); }
+    }
+    const child: HotSection = { key: 'kids', title: '儿童动画', subtitle: '精选片单',
+      type: '', tag: '', items: kids, loading: false, message: '', expanded: false };
+    if (this.origin === 'children') { this.hotSections = [child]; return; }
+    this.hotSections = [
+      { key: 'tv', title: '热门电视剧', subtitle: '豆瓣榜单', type: 'tv', tag: '热门',
+        items: [], loading: true, message: '', expanded: false },
+      { key: 'movie', title: '热门电影', subtitle: '豆瓣榜单', type: 'movie', tag: '热门',
+        items: [], loading: true, message: '', expanded: false },
+      child,
+      { key: 'anime', title: '国产动画', subtitle: '豆瓣榜单', type: 'tv', tag: '国产动画',
+        items: [], loading: true, message: '', expanded: false }
+    ];
+  }
+
+  private updateHot(key: string, items: DoubanItem[], loading: boolean, message: string): void {
+    this.hotSections = this.hotSections.map((section: HotSection): HotSection => {
+      if (section.key !== key) { return section; }
+      return { key: section.key, title: section.title, subtitle: section.subtitle, type: section.type,
+        tag: section.tag, items: items, loading: loading, message: message, expanded: section.expanded };
+    });
+  }
+
+  private toggleHot(key: string): void {
+    this.hotSections = this.hotSections.map((section: HotSection): HotSection => {
+      if (section.key !== key) { return section; }
+      return { key: section.key, title: section.title, subtitle: section.subtitle, type: section.type,
+        tag: section.tag, items: section.items, loading: section.loading, message: section.message,
+        expanded: !section.expanded };
+    });
+  }
+
+  private loadHot(): void {
+    const generation = ++this.hotGeneration;
+    const server = this.session.serverUrl;
+    for (const section of this.hotSections) {
+      if (section.type !== '') { this.loadHotSection(section, server, generation); }
+    }
+  }
+
+  private async loadHotSection(section: HotSection, server: string, generation: number): Promise<void> {
+    let items = section.items;
+    this.updateHot(section.key, items, true, '');
+    if (this.prefs !== null) {
+      try {
+        const cached = await this.prefs.getRecommendations(server, `${section.type}|${section.tag}`);
+        if (!this.active || generation !== this.hotGeneration || server !== this.session.serverUrl) { return; }
+        if (cached.length > 0) { items = cached.slice(0, 12); this.updateHot(section.key, items, true, ''); }
+      } catch (e) { /* Network refresh can still succeed. */ }
+    }
+    const api = this.session.api;
+    if (api === null) {
+      this.updateHot(section.key, items, false, items.length === 0 ? '连接服务端后查看推荐' : '');
+      return;
+    }
+    try {
+      const fresh = await api.douban(section.type, section.tag, 0, 12);
+      if (!this.active || generation !== this.hotGeneration || server !== this.session.serverUrl) { return; }
+      if (fresh.length > 0) {
+        items = fresh;
+        const prefs = this.prefs;
+        if (prefs !== null) {
+          this.hotCacheWrites = this.hotCacheWrites.catch(() => {}).then(() =>
+            prefs.setRecommendations(server, `${section.type}|${section.tag}`, fresh)).catch(() => {});
+        }
+      }
+      this.updateHot(section.key, items, false, items.length === 0 ? '暂无推荐，点击重试' : '');
+    } catch (e) {
+      if (!this.active || generation !== this.hotGeneration || server !== this.session.serverUrl) { return; }
+      this.updateHot(section.key, items, false, items.length === 0 ? '推荐加载失败，点击重试' : '');
+    }
+  }
+
+  @Builder
+  hotRecommendations() {
+    Column({ space: 12 }) {
+      ForEach(this.hotSections, (section: HotSection) => {
+        Column({ space: 4 }) {
+          Row({ space: 8 }) {
+            Column().width(4).height(19).backgroundColor(Theme.ACCENT).borderRadius(2)
+            Text(section.title).fontSize(16).fontWeight(FontWeight.Bold).fontColor(Theme.INK).layoutWeight(1)
+            Text(section.loading ? '更新中…' : section.subtitle).fontSize(11).fontColor(Theme.SECONDARY)
+            if (section.items.length > 5) {
+              Text(section.expanded ? '收起' : '更多').fontSize(12).fontColor(Theme.ACCENT).padding(4)
+                .onClick(() => { this.toggleHot(section.key); })
+            }
+          }.width('100%').padding({ bottom: 6 })
+          if (section.message !== '') {
+            Text(section.message).fontSize(13).fontColor(Theme.SECONDARY)
+              .width('100%').padding({ top: 10, bottom: 10 }).onClick(() => { this.loadHot(); })
+          } else if (section.items.length === 0 && section.loading) {
+            Text('正在加载…').fontSize(13).fontColor(Theme.SECONDARY).padding({ top: 10, bottom: 10 })
+          } else {
+            ForEach(section.items.slice(0, section.expanded ? 12 : 5), (item: DoubanItem, index: number) => {
+              Row({ space: 12 }) {
+                Text(`${index + 1}`).fontSize(15).fontWeight(FontWeight.Bold)
+                  .fontColor(index === 0 ? '#D05A4F' : index === 1 ? '#CD8242' : Theme.SECONDARY)
+                  .width(24).textAlign(TextAlign.Center)
+                Text(item.title).fontSize(14).fontColor(Theme.INK).layoutWeight(1)
+                  .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+                if (item.rating !== '') { Text(item.rating).fontSize(12).fontColor(Theme.SECONDARY) }
+                Text('›').fontSize(18).fontColor(Theme.TERTIARY)
+              }.width('100%').padding({ left: 4, right: 4, top: 9, bottom: 9 })
+                .borderRadius(8).onClick(() => { this.useHistory(item.title); })
+            }, (item: DoubanItem, index: number) => `${section.key}-${index}-${item.title}`)
+          }
+        }.width('100%').padding(14).borderRadius(16).backgroundColor(Theme.PANEL)
+          .border({ width: 1, color: Theme.BORDER })
+      }, (section: HotSection) => section.key)
+    }.width('100%').padding({ left: 16, right: 16, bottom: 16 })
   }
 
   /** 联想池：最近搜索 + 收藏 + 看过的，够覆盖日常片名，不必联网 */
@@ -624,6 +766,8 @@ struct SearchPage {
               this.keyword = v;
               // 清空输入就回到「最近搜索」状态，而不是把上一轮结果留在屏幕上
               if (v.trim() === '') {
+                this.searchGeneration++;
+                this.searching = false;
                 this.searchedKeyword = '';
                 this.setGroups([]);
                 this.statusMsg = '';
@@ -646,8 +790,6 @@ struct SearchPage {
 
         if (this.suggestions.length > 0) {
           this.suggestionBar()
-        } else if (this.keyword.trim() === '' && this.history.length > 0 && this.groups.length === 0) {
-          this.historyBar()
         }
 
         if (this.groups.length === 0 && !this.searching && this.statusMsg === '没有结果') {
@@ -657,11 +799,13 @@ struct SearchPage {
               Text(this.searchSourceCount()).fontSize(12).fontColor(Theme.TERTIARY)
             }
           }.layoutWeight(1).justifyContent(FlexAlign.Center).width('100%')
-        } else if (this.groups.length === 0 && this.keyword.trim() === '' && this.history.length === 0) {
-          Column({ space: 6 }) {
-            Text('搜片名，或者打拼音首字母').fontSize(14).fontColor(Theme.SECONDARY)
-            Text('例如「cjqc」可以找到《超级汽车》').fontSize(12).fontColor(Theme.TERTIARY)
-          }.layoutWeight(1).justifyContent(FlexAlign.Center).width('100%')
+        } else if (this.keyword.trim() === '' && this.groups.length === 0 && !this.searching) {
+          Scroll() {
+            Column() {
+              if (this.history.length > 0) { this.historyBar() }
+              this.hotRecommendations()
+            }.width('100%')
+          }.layoutWeight(1).width('100%').scrollBar(BarState.Off)
         } else {
           List({ space: 9 }) {
             LazyForEach(this.source, (g: SearchGroup) => {

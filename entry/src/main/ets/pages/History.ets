@@ -3,12 +3,13 @@ import { RouteParams } from './RouteParams';
  * 历史页 —— 观看记录（续播入口、删除单条、清空）。
  */
 
-import { router } from '@kit.ArkUI';
+import { router, promptAction } from '@kit.ArkUI';
 import { Prefs, WatchEntry } from '../store/Prefs';
 import { Session } from '../store/Session';
 import { Theme } from '../common/Theme';
 import { PosterImage } from '../components/PosterImage';
 import { EntrySource } from '../components/EntrySource';
+import { resumePlaybackParams } from '../common/ResumePlayback';
 
 @Entry
 @Component
@@ -18,14 +19,25 @@ struct History {
   private session: Session = Session.getInstance();
   private prefs: Prefs | null = null;
   private source: EntrySource = new EntrySource();
+  private disposed: boolean = false;
+  private resuming: boolean = false;
+  private resumeGeneration: number = 0;
 
   aboutToAppear(): void {
+    this.disposed = false;
     Prefs.get(getContext(this)).then((p: Prefs) => {
       this.prefs = p;
       p.getHistory().then((l: WatchEntry[]) => {
         this.setList(l);
       });
     });
+  }
+
+  aboutToDisappear(): void { this.disposed = true; this.resumeGeneration++; }
+
+  onPageShow(): void {
+    this.disposed = false;
+    if (this.prefs !== null) { this.prefs.getHistory().then((l: WatchEntry[]) => { this.setList(l); }).catch(() => {}); }
   }
 
   private setList(l: WatchEntry[]): void {
@@ -62,12 +74,17 @@ struct History {
     });
   }
 
-  private goDetail(e: WatchEntry): void {
-    router.pushUrl({
-      url: 'pages/Detail',
-      // 带上片名：选集若命中本地缓存，详情页可以立刻有标题而不是空白
-      params: { sourceUrl: e.sourceUrl, vodId: e.vodId, resumeKey: e.key, title: e.title } as RouteParams
-    });
+  private async resume(e: WatchEntry): Promise<void> {
+    if (this.resuming) { return; }
+    this.resuming = true;
+    const generation = this.resumeGeneration;
+    promptAction.showToast({ message: '正在准备续播…', duration: 1000 });
+    try {
+      const params = await resumePlaybackParams(getContext(this), e, this.session);
+      if (!this.disposed && generation === this.resumeGeneration) { await router.pushUrl({ url: 'pages/Player', params: params }); }
+    } catch (error) {
+      if (!this.disposed && generation === this.resumeGeneration) { promptAction.showToast({ message: (error as Error).message || '无法继续播放' }); }
+    } finally { this.resuming = false; }
   }
 
   build() {
@@ -117,7 +134,7 @@ struct History {
               }
               .width('100%').padding({ left: 12, right: 12, top: 10, bottom: 10 })
               .borderRadius(Theme.RADIUS_ROW).backgroundColor(Theme.PANEL)
-              .onClick(() => { this.goDetail(e); })
+              .onClick(() => { this.resume(e); })
             }
           }, (e: WatchEntry) => e.key + e.updatedAt.toString())
         }

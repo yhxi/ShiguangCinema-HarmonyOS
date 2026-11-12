@@ -211,6 +211,7 @@ struct Player {
     this.sourceUrl = params['sourceUrl'] ?? '';
     this.vodId = params['vodId'] ?? '';
     this.resumeMs = parseInt(params['resumeMs'] ?? '0');
+    this.resumeRequestedManually = params['forceResume'] === '1';
     if (isNaN(this.episodeIndex)) {
       this.episodeIndex = 0;
     }

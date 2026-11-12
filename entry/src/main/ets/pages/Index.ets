@@ -15,6 +15,7 @@ import { Credentials } from '../store/Credentials';
 import { DEFAULT_SERVER_URL } from '../store/DefaultServer';
 import { checkUpdate, isNewerVersion, releasesPageUrl, ReleaseInfo } from '../api/UpdateChecker';
 import { PosterImage } from '../components/PosterImage';
+import { resumePlaybackParams } from '../common/ResumePlayback';
 import { HomeIcon, iconFillPath } from '../components/HomeIcon';
 import { UpdateDialog } from '../components/UpdateDialog';
 import { Theme } from '../common/Theme';
@@ -130,6 +131,7 @@ struct Index {
 
   aboutToDisappear(): void {
     this.disposed = true;
+    this.resumeGeneration++;
     this.stopRecommendRetry();
     if (this.homeWindow !== null) {
       this.homeWindow.setSpecificSystemBarEnabled('navigationIndicator', true).catch(() => {});
@@ -325,11 +327,20 @@ struct Index {
     return `${Math.max(1, m)} 分钟`;
   }
 
-  private openRecent(entry: WatchEntry): void {
-    const params: RouteParams = {
-      sourceUrl: entry.sourceUrl, vodId: entry.vodId, resumeKey: entry.key
-    } as RouteParams;
-    router.pushUrl({ url: 'pages/Detail', params: params });
+  private resuming: boolean = false;
+  private resumeGeneration: number = 0;
+
+  private async openRecent(entry: WatchEntry): Promise<void> {
+    if (this.resuming) { return; }
+    this.resuming = true;
+    const generation = this.resumeGeneration;
+    promptAction.showToast({ message: '正在准备续播…', duration: 1000 });
+    try {
+      const params = await resumePlaybackParams(getContext(this), entry, this.session);
+      if (!this.disposed && generation === this.resumeGeneration) { await router.pushUrl({ url: 'pages/Player', params: params }); }
+    } catch (e) {
+      if (!this.disposed && generation === this.resumeGeneration) { promptAction.showToast({ message: (e as Error).message || '无法继续播放' }); }
+    } finally { this.resuming = false; }
   }
 
   private async loadDouban(refresh: boolean = true, silentRetry: boolean = false): Promise<void> {

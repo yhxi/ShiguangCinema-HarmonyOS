@@ -9,6 +9,8 @@ export interface RouteParams {
   index?: string;
   cover?: string;
   resumeMs?: string;
+  /** 用户从观看记录明确选择续播 */
+  forceResume?: string;
   isLive?: string;
   /** 从儿童乐园点进来：搜索页据此显示「返回儿童乐园」 */
   fromChildren?: string;
