@@ -66,6 +66,10 @@ export class ChildrenArtwork {
     return list !== undefined && list.length > 0 ? list[0] : '';
   }
 
+  static urls(context: common.Context, title: string): string[] {
+    return (ChildrenArtwork.ensure(context).get(title) ?? []).slice();
+  }
+
   static count(context: common.Context): number {
     return ChildrenArtwork.ensure(context).size;
   }

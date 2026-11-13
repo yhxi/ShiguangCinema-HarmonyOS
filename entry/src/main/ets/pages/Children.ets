@@ -8,14 +8,15 @@
  */
 
 import { RouteParams } from './RouteParams';
-import { router } from '@kit.ArkUI';
+import { router, promptAction } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
 import { ChildrenCatalog, ChildrenSection } from '../api/ChildrenCatalog';
 import { ChildrenArtwork } from '../api/ChildrenArtwork';
 import { ChildrenQuota, normalizeSeries } from '../store/ChildrenQuota';
 import { Prefs } from '../store/Prefs';
 import { Session } from '../store/Session';
-import { PosterImage } from '../components/PosterImage';
+import { SearchItem } from '../api/Models';
+import { PosterImage, retryPosterCache } from '../components/PosterImage';
 import { ParentPanel } from '../components/ParentPanel';
 import { Theme } from '../common/Theme';
 
@@ -24,6 +25,7 @@ interface KidCard {
   cover: string;
   /** 该片名是否有核验过的封面（没有时显示插画底） */
   hasArt: boolean;
+  retryToken: number;
 }
 
 interface KidSection {
@@ -80,6 +82,12 @@ struct Children {
   @State exhausted: boolean = false;
   @State dailyMinutes: number = 15;
   @State showParent: boolean = false;
+  @State coverPickerTitle: string = '';
+  @State coverCandidates: SearchItem[] = [];
+  @State coverLoading: boolean = false;
+  @State coverMessage: string = '';
+  private coverGeneration: number = 0;
+  private suppressClickUntil: number = 0;
 
   private session: Session = Session.getInstance();
   private prefs: Prefs | null = null;
@@ -97,8 +105,8 @@ struct Children {
       for (const section of ChildrenCatalog.sections()) {
         const cards: KidCard[] = [];
         for (const title of section.titles) {
-          const cover = ChildrenArtwork.firstUrl(ctx, title);
-          cards.push({ title: title, cover: cover, hasArt: cover !== '' });
+          const cover = p.getRaw(`kidCover:${title}`, '') || ChildrenArtwork.firstUrl(ctx, title);
+          cards.push({ title: title, cover: cover, hasArt: cover !== '', retryToken: 0 });
         }
         const source = new KidCardSource();
         source.setCards(cards);
@@ -141,8 +149,69 @@ struct Children {
   }
 
   private openTitle(title: string): void {
+    if (Date.now() < this.suppressClickUntil) { return; }
     const params: RouteParams = { 'keyword': title, 'fromChildren': '1' } as RouteParams;
     router.pushUrl({ url: 'pages/Search', params: params }).catch(() => {});
+  }
+
+  private updateCover(title: string, url: string): void {
+    for (const section of this.sections) {
+      const cards = section.cards.map((card: KidCard): KidCard => card.title === title ?
+        { title: card.title, cover: url, hasArt: url !== '', retryToken: card.retryToken + 1 } : card);
+      section.cards = cards;
+      section.source.setCards(cards);
+    }
+  }
+
+  private async saveCover(title: string, url: string): Promise<void> {
+    if (this.prefs === null) { return; }
+    try {
+      await this.prefs.putRaw(`kidCover:${title}`, url);
+      this.updateCover(title, url);
+    } catch (e) { promptAction.showToast({ message: '封面保存失败，请重试' }); }
+  }
+
+  private async findCovers(title: string): Promise<void> {
+    const generation = ++this.coverGeneration;
+    this.coverPickerTitle = title;
+    this.coverCandidates = [];
+    this.coverLoading = true;
+    this.coverMessage = '';
+    const api = this.session.api;
+    if (api === null) { this.coverLoading = false; this.coverMessage = '请先连接服务端'; return; }
+    try {
+      const result = await api.search(title, this.session.enabledSources());
+      if (generation !== this.coverGeneration) { return; }
+      const seen: Set<string> = new Set();
+      this.coverCandidates = result.items.filter((item: SearchItem) => {
+        if (item.pic === '' || seen.has(item.pic)) { return false; }
+        seen.add(item.pic);
+        return true;
+      }).slice(0, 30);
+      if (this.coverCandidates.length === 0) { this.coverMessage = '没有找到可用封面'; }
+    } catch (e) {
+      if (generation === this.coverGeneration) { this.coverMessage = '搜索封面失败，请稍后重试'; }
+    } finally { if (generation === this.coverGeneration) { this.coverLoading = false; } }
+  }
+
+  private async coverMenu(card: KidCard): Promise<void> {
+    this.suppressClickUntil = Date.now() + 1000;
+    try {
+      const choice = await promptAction.showActionMenu({ title: `《${card.title}》封面`, buttons: [
+        { text: '从搜索结果选封面', color: Theme.INK },
+        { text: '换一张封面', color: Theme.INK },
+        { text: '重试封面加载', color: Theme.INK }
+      ] });
+      if (choice.index === 0) { this.findCovers(card.title); }
+      if (choice.index === 1) {
+        const urls = ChildrenArtwork.urls(getContext(this) as common.UIAbilityContext, card.title);
+        if (urls.length === 0) { this.findCovers(card.title); return; }
+        const next = urls[(urls.indexOf(card.cover) + 1) % urls.length];
+        if (next === card.cover) { this.findCovers(card.title); return; }
+        this.saveCover(card.title, next);
+      }
+      if (choice.index === 2) { retryPosterCache(); this.updateCover(card.title, card.cover); }
+    } catch (e) { /* Menu dismissed. */ }
   }
 
   @Builder
@@ -150,7 +219,8 @@ struct Children {
     Column({ space: 6 }) {
       Stack() {
         if (card.cover !== '') {
-          PosterImage({ url: card.cover, proxy: this.proxyOf(card.cover), cookie: this.cookie(), posterHeight: 168 })
+          PosterImage({ url: card.cover, proxy: this.proxyOf(card.cover), cookie: this.cookie(),
+            posterHeight: 168, retryToken: card.retryToken })
         } else {
           // 没有核验封面：用片名首字 + 浅绿底做插画兜底，不留“暂无封面”的空白
           Column() {
@@ -166,6 +236,7 @@ struct Children {
         .textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%')
     }
     .width(112)
+    .gesture(LongPressGesture({ repeat: false }).onAction(() => { this.coverMenu(card); }))
     .onClick(() => { this.openTitle(card.title); })
   }
 
@@ -274,6 +345,41 @@ struct Children {
           .hitTestBehavior(HitTestMode.Default)
         }
         .width('100%').height('100%')
+      }
+      if (this.coverPickerTitle !== '') {
+        Stack({ alignContent: Alignment.Center }) {
+          Column().width('100%').height('100%').backgroundColor('#66000000')
+            .onClick(() => { this.coverGeneration++; this.coverPickerTitle = ''; })
+          Column({ space: 12 }) {
+            Row() {
+              Text(`选择《${this.coverPickerTitle}》封面`).fontSize(17).fontWeight(FontWeight.Bold)
+                .fontColor(Theme.KID_INK).layoutWeight(1).maxLines(2)
+              Text('关闭').fontSize(14).fontColor(Theme.ACCENT).padding(8)
+                .onClick(() => { this.coverGeneration++; this.coverPickerTitle = ''; })
+            }.width('100%')
+            if (this.coverLoading) { Text('正在搜索封面…').fontColor(Theme.KID_SECONDARY) }
+            if (this.coverMessage !== '') { Text(this.coverMessage).fontColor(Theme.KID_SECONDARY) }
+            List({ space: 8 }) {
+              ForEach(this.coverCandidates, (item: SearchItem) => {
+                ListItem() {
+                  Row({ space: 12 }) {
+                    PosterImage({ url: item.pic, proxy: this.proxyOf(item.pic), cookie: this.cookie(), posterHeight: 90 })
+                      .width(60).height(90)
+                    Column({ space: 4 }) {
+                      Text(item.name).fontSize(14).fontColor(Theme.KID_INK).maxLines(2)
+                      Text(item.sourceName).fontSize(12).fontColor(Theme.KID_SECONDARY).maxLines(1)
+                    }.alignItems(HorizontalAlign.Start).layoutWeight(1)
+                  }.width('100%').onClick(() => {
+                    const title = this.coverPickerTitle;
+                    this.coverGeneration++;
+                    this.coverPickerTitle = '';
+                    this.saveCover(title, item.pic);
+                  })
+                }
+              }, (item: SearchItem) => item.pic)
+            }.width('100%').layoutWeight(1).scrollBar(BarState.Auto)
+          }.width('90%').height('70%').padding(16).borderRadius(18).backgroundColor(Theme.PANEL)
+        }.width('100%').height('100%')
       }
     }
     .width('100%').height('100%')

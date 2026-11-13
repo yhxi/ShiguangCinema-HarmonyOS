@@ -45,6 +45,8 @@ class PosterCache {
   private static readonly DISK_BYTES_TRIM_TO: number = 190 * 1024 * 1024;
   private static readonly GRAVEYARD_MS: number = 120000;
 
+  static clearFailures(): void { PosterCache.failures.clear(); }
+
   static clear(): void {
     PosterCache.generation++;
     PosterCache.images.clear();
@@ -276,6 +278,7 @@ class PosterCache {
 }
 
 export function clearPosterCache(): void { PosterCache.clear(); }
+export function retryPosterCache(): void { PosterCache.clearFailures(); }
 
 @Component
 export struct PosterImage {
@@ -283,6 +286,7 @@ export struct PosterImage {
   @Prop proxy: string = '';
   @Prop @Watch('loadPoster') cookie: string = '';
   @Prop posterHeight: number = 240;
+  @Prop @Watch('loadPoster') retryToken: number = 0;
   @State bitmap: image.PixelMap | null = null;
   private active: boolean = true;
 
