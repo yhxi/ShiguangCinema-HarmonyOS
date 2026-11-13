@@ -2,8 +2,8 @@
   "app": {
     "bundleName": "com.lshai.shiguangcinema",
     "vendor": "lshai",
-    "versionCode": 10161,
-    "versionName": "1.5.5.6",
+    "versionCode": 10162,
+    "versionName": "1.5.5.7",
     "icon": "$media:app_icon",
     "label": "$string:app_name"
   }

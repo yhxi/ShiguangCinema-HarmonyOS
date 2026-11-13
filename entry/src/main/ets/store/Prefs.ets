@@ -38,6 +38,12 @@ export interface WatchEntry {
   updatedAt: number;
 }
 
+/** 同一服务端中，片名完全一致的不同来源合并显示。 */
+function sameHistoryTitle(a: WatchEntry, b: WatchEntry): boolean {
+  const title = a.title.trim().toLowerCase();
+  return title !== '' && title === b.title.trim().toLowerCase() && a.serverUrl === b.serverUrl;
+}
+
 export interface PlaybackSettings {
   speedIndex: number;
   autoNext: boolean;
@@ -346,7 +352,13 @@ export class Prefs {
     if (this.historyCache === null) {
       await this.loadHistoryFromDisk();
     }
-    return (this.historyCache as WatchEntry[]).slice();
+    const result: WatchEntry[] = [];
+    for (const entry of this.historyCache as WatchEntry[]) {
+      if (!result.some((other: WatchEntry) => other.key === entry.key || sameHistoryTitle(other, entry))) {
+        result.push(entry);
+      }
+    }
+    return result;
   }
 
   async saveWatch(entry: WatchEntry): Promise<void> {
@@ -400,7 +412,9 @@ export class Prefs {
     if (this.historyCache === null) {
       await this.loadHistoryFromDisk();
     }
-    const list = (this.historyCache as WatchEntry[]).filter((e: WatchEntry) => e.key !== key);
+    const target = (this.historyCache as WatchEntry[]).find((e: WatchEntry) => e.key === key);
+    const list = (this.historyCache as WatchEntry[]).filter((e: WatchEntry) =>
+      e.key !== key && (target === undefined || !sameHistoryTitle(e, target)));
     this.historyCache = list;
     await this.putEntryList(KEY_HISTORY, list);
   }

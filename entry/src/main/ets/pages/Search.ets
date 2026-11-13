@@ -545,7 +545,8 @@ struct SearchPage {
       params: {
         sourceUrl: item.sourceUrl,
         vodId: item.vodId,
-        title: item.name
+        title: item.name,
+        cover: item.pic
       } as RouteParams
     });
   }

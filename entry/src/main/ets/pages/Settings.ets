@@ -190,18 +190,6 @@ struct SettingsPage {
         }.width('100%').padding({ top: 12, bottom: 8 })
 
         Text('设置').fontSize(27).fontWeight(FontWeight.Bold).fontColor(Theme.INK).width('100%')
-        Text('让观影体验保持顺手、稳定。').fontSize(15).fontColor(Theme.SECONDARY).width('100%')
-          .padding({ bottom: 4 })
-        Row({ space: 8 }) {
-          Text(this.connected ? '●' : '○').fontSize(11)
-            .fontColor(this.connected ? Theme.ACCENT : Theme.TERTIARY)
-          Text(this.serverName !== '' ? this.serverName : '未连接服务端').fontSize(12)
-            .fontColor(Theme.SECONDARY).layoutWeight(1).maxLines(1)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
-          Text(`${this.pointSourceCount} 个片源`).fontSize(11).fontColor(Theme.TERTIARY)
-        }.width('100%').padding({ bottom: 10 })
-
-        // v1.3.12 起设置页不再有顶部绿色连接状态大卡，服务端信息收进普通列表项
         Text('观影设置').fontSize(16).fontWeight(FontWeight.Bold).fontColor(Theme.INK)
           .width('100%').padding({ top: 22, bottom: 10 })
         this.card({ icon: '+', title: '片源管理',

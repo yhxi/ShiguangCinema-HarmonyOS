@@ -40,6 +40,7 @@ const PRESETS: Preset[] = [
 struct Index {
   @State connected: boolean = true;
   @State connecting: boolean = false;
+  @State canReturnToServer: boolean = false;
   @State urlText: string = '';
   @State pwdText: string = '';
   @State statusMsg: string = '';
@@ -176,10 +177,32 @@ struct Index {
     this.stopRetry();
     this.connectionAttempt++;
     this.session.invalidateConnection();
+    this.canReturnToServer = this.session.api !== null && this.session.serverUrl !== '';
     this.connecting = false;
     this.connected = false;
     this.showSettings = false;
     this.pwdText = '';
+  }
+
+  private returnToServer(): void {
+    if (!this.canReturnToServer || this.connecting) { return; }
+    this.connectionAttempt++;
+    this.session.invalidateConnection();
+    this.urlText = this.session.serverUrl;
+    this.pwdText = '';
+    this.errorMsg = '';
+    this.statusMsg = '';
+    this.canReturnToServer = false;
+    this.connected = true;
+    this.refreshHome(false);
+  }
+
+  onBackPress(): boolean {
+    if (!this.connected && this.canReturnToServer) {
+      this.returnToServer();
+      return true;
+    }
+    return false;
   }
 
   onPageShow(): void {
@@ -247,6 +270,7 @@ struct Index {
       if (attempt !== this.connectionAttempt || this.disposed) { return; }
       this.pwdText = '';
       this.retryCount = 0;
+      this.canReturnToServer = false;
       this.connected = true;
       this.statusMsg = saveFailed ? '密码安全保存失败，会话失效后需要重新输入' : '';
       this.refreshHome();
@@ -668,6 +692,14 @@ struct Index {
           .backgroundColor(Theme.ACCENT).fontColor(Theme.ON_ACCENT)
           .enabled(!this.connecting)
           .onClick(() => { this.tryConnect(false); })
+
+        if (this.canReturnToServer) {
+          Button('返回当前服务端')
+            .width('100%').height(44).borderRadius(14)
+            .backgroundColor(Theme.TINT).fontColor(Theme.ACCENT)
+            .enabled(!this.connecting)
+            .onClick(() => { this.returnToServer(); })
+        }
 
         if (this.statusMsg !== '') {
           Text(this.statusMsg).fontSize(12).fontColor(Theme.SECONDARY)

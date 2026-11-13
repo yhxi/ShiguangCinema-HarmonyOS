@@ -10,12 +10,13 @@ export function stripHtml(text: string): string {
   if (text === '') {
     return '';
   }
-  return text.replace(/<[^>]{0,40}>/g, ' ')
+  return text
     .replace(/&nbsp;/g, ' ')
     .replace(/&amp;/g, '&')
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"')
+    .replace(/<\/?[a-zA-Z][^>]*>/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 }

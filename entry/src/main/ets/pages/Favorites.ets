@@ -146,7 +146,8 @@ struct Favorites {
               .onClick(() => {
                 router.pushUrl({
                   url: 'pages/Detail',
-                  params: { sourceUrl: e.sourceUrl, vodId: e.vodId, resumeKey: '', title: e.title } as RouteParams
+                  params: { sourceUrl: e.sourceUrl, vodId: e.vodId, resumeKey: '', title: e.title,
+                    cover: e.cover } as RouteParams
                 });
               })
             }

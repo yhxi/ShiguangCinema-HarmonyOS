@@ -60,6 +60,9 @@ struct DetailPage {
     if (params !== undefined && params['title'] !== undefined && this.info['title'] === '') {
       this.info['title'] = params['title'];
     }
+    if (params !== undefined && params['cover'] !== undefined) {
+      this.info['cover'] = params['cover'];
+    }
     Prefs.get(getContext(this)).then(async (p: Prefs) => {
       this.prefs = p;
       if (this.session.serverUrl !== '') {
@@ -202,7 +205,8 @@ struct DetailPage {
     this.episodes = d.episodes;
     this.info = {
       'title': d.info.title !== '' ? d.info.title : this.info['title'],
-      'cover': d.info.cover, 'desc': stripHtml(d.info.desc), 'remarks': d.info.remarks,
+      'cover': d.info.cover !== '' ? d.info.cover : this.info['cover'],
+      'desc': stripHtml(d.info.desc), 'remarks': d.info.remarks,
       'year': d.info.year, 'area': d.info.area, 'actor': d.info.actor
     };
     if (this.lastWatch !== null && this.lastWatch.episodeIndex >= 0 &&
@@ -308,9 +312,20 @@ struct DetailPage {
 
       if (this.loading) {
         Column({ space: 10 }) {
-          LoadingProgress().width(36).height(36).color(Theme.ACCENT)
-          Text('加载中…').fontSize(13).fontColor(Theme.SECONDARY)
-        }.layoutWeight(1).justifyContent(FlexAlign.Center).width('100%')
+          if (this.info['title'] !== '') {
+            Row({ space: 14 }) {
+              PosterImage({ url: this.info['cover'], proxy: this.proxyImg(this.info['cover']),
+                cookie: this.session.api !== null ? this.session.api.currentCookie() : '', posterHeight: 158 })
+                .width(108).height(158)
+              Text(this.info['title']).fontSize(21).fontWeight(FontWeight.Bold).fontColor(Theme.INK)
+                .maxLines(2).layoutWeight(1)
+            }.width('100%').padding({ left: 16, right: 16, top: 20 })
+          }
+          Column({ space: 10 }) {
+            LoadingProgress().width(36).height(36).color(Theme.ACCENT)
+            Text('正在加载选集…').fontSize(13).fontColor(Theme.SECONDARY)
+          }.layoutWeight(1).justifyContent(FlexAlign.Center).width('100%')
+        }.layoutWeight(1).width('100%')
       } else if (this.errorMsg !== '') {
         Column({ space: 14 }) {
           Text(this.errorMsg).fontSize(14).fontColor(Theme.DANGER).textAlign(TextAlign.Center)
