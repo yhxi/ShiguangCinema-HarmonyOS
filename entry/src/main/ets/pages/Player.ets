@@ -16,6 +16,7 @@ import { backgroundTaskManager } from '@kit.BackgroundTasksKit';
 import { avSession } from '@kit.AVSessionKit';
 import { wantAgent } from '@kit.AbilityKit';
 import { fitVideoFrame } from './VideoLayout';
+import { EpisodeListSource } from './EpisodeListSource';
 import { Prefs, PlaybackSettings, SkipMarks, WatchEntry, entryFromStatus } from '../store/Prefs';
 import { Session } from '../store/Session';
 import { ChildrenQuota } from '../store/ChildrenQuota';
@@ -24,50 +25,13 @@ import { SourceConfig, SearchItem, Detail } from '../api/Models';
 interface PlayerMenuAction { label: string; action: () => void; }
 interface PlayerTrack { index: number; type: number; label: string; }
 
-/**
- * 选集面板的数据源。
- * 像《海贼王》这种一千多集的剧，一次性建 1000 个列表行会让面板弹出时明显卡顿；
- * 换成 LazyForEach 之后只建面板里看得见的那几行。
- */
-class EpisodeListSource implements IDataSource {
-  private items: string[] = [];
-  private listeners: DataChangeListener[] = [];
-
-  setItems(items: string[]): void {
-    this.items = items;
-    for (const listener of this.listeners) {
-      listener.onDataReloaded();
-    }
-  }
-
-  totalCount(): number {
-    return this.items.length;
-  }
-
-  getData(index: number): string {
-    return this.items[index];
-  }
-
-  registerDataChangeListener(listener: DataChangeListener): void {
-    if (!this.listeners.includes(listener)) {
-      this.listeners.push(listener);
-    }
-  }
-
-  unregisterDataChangeListener(listener: DataChangeListener): void {
-    const idx = this.listeners.indexOf(listener);
-    if (idx >= 0) {
-      this.listeners.splice(idx, 1);
-    }
-  }
-}
-
 /** 字节/秒 → 人类可读 */
 function formatNetSpeed(bytesPerSec: number): string {
   if (bytesPerSec >= 1024 * 1024) { return `${(bytesPerSec / 1024 / 1024).toFixed(1)} MB/s`; }
   if (bytesPerSec >= 1024) { return `${Math.round(bytesPerSec / 1024)} KB/s`; }
   return `${Math.round(bytesPerSec)} B/s`;
 }
+
 
 @Entry
 @Component
@@ -1015,7 +979,9 @@ struct Player {
       this.episodeIndex, this.episodes.length,
       final ? p.currentTime : this.curMs, this.durMs
     );
-    this.prefs.saveWatch(entry).catch(() => {});
+    this.prefs.saveWatch(entry).catch(() => {
+      if (final) { promptAction.showToast({ message: '观看进度保存失败，请检查设备存储' }); }
+    });
   }
 
 

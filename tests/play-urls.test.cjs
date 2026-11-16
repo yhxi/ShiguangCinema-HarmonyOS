@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
-const ts = require('E:/Development/command-line-tools/sdk/default/openharmony/ets/build-tools/ets-loader/node_modules/typescript');
+const ts = require(require('node:path').join(process.env.DEVECO_SDK_HOME || 'E:/Development/command-line-tools/sdk', 'default/openharmony/ets/build-tools/ets-loader/node_modules/typescript'));
 const source = fs.readFileSync('entry/src/main/ets/api/PlayUrls.ets', 'utf8');
 const output = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 } });
 const context = { exports: {} };

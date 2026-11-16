@@ -670,6 +670,11 @@ struct Index {
           .placeholderColor(Theme.SECONDARY)
           .onChange((v: string) => { this.urlText = v; })
 
+        if (this.urlText.trim().toLowerCase().startsWith('http://')) {
+          Text('HTTP 连接未加密，密码和会话可能被网络中的其他人读取。建议使用 HTTPS。')
+            .fontSize(12).fontColor(Theme.DANGER).width('100%')
+        }
+
         TextInput({ placeholder: '访问密码（可选）', text: this.pwdText })
           .type(InputType.Password).fontSize(15).height(48).borderRadius(14)
           .backgroundColor(Theme.BG).fontColor(Theme.INK)

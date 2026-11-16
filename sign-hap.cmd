@@ -16,7 +16,9 @@ set ALIAS=shiguang
 set ALIAS_PWD=%SIGN_PWD%
 set CERT=%PROJECT_HOME%sign\shiguang-debug.cer
 set PROFILE=%PROJECT_HOME%sign\shiguang-debug.p7b
-set OUT=%PROJECT_HOME%dist\shiguang-1.5.5.8-debug-signed.hap
+for /f "usebackq delims=" %%V in (`node -e "process.stdout.write(JSON.parse(require('fs').readFileSync('AppScope/app.json5','utf8')).app.versionName)"`) do set APP_VERSION=%%V
+if not defined APP_VERSION (echo [ERROR] cannot read versionName & exit /b 1)
+set OUT=%PROJECT_HOME%dist\shiguang-%APP_VERSION%-debug-signed.hap
 set IN=%PROJECT_HOME%entry\build\default\outputs\default\entry-default-unsigned.hap
 
 if not exist "%CERT%" (

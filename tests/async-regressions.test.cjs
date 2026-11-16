@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
-const ts = require('E:/Development/command-line-tools/sdk/default/openharmony/ets/build-tools/ets-loader/node_modules/typescript');
+const ts = require(require('node:path').join(process.env.DEVECO_SDK_HOME || 'E:/Development/command-line-tools/sdk', 'default/openharmony/ets/build-tools/ets-loader/node_modules/typescript'));
 function load(src, requireFn) {
   const js = ts.transpileModule(src, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 } }).outputText;
   const ctx = { exports: {}, require: requireFn || (() => ({})), console, setTimeout, clearTimeout };
@@ -170,4 +170,19 @@ test('search suggestions load separate movie, television and animation lists', a
   assert.equal(h.hotSections.find(s => s.key === 'kids').items[0].title, '小猪佩奇');
   assert.equal(h.hotSections.find(s => s.key === 'movie').items[0].title, 'movie-热门');
   h.toggleHot('movie'); assert.equal(h.hotSections.find(s => s.key === 'movie').expanded, true);
+});
+
+test('cancelling a search destroys only its requests and prevents double destruction', () => {
+  const src = fs.readFileSync('entry/src/main/ets/api/DirectCms.ets', 'utf8');
+  const { SearchRequests } = load(src);
+  const group = new SearchRequests();
+  let destroyed = 0;
+  const client = { destroy: () => { destroyed++; } };
+  group.add(client);
+  group.cancel();
+  assert.equal(group.cancelled, true);
+  assert.equal(destroyed, 1);
+  assert.equal(group.remove(client), false);
+  group.cancel();
+  assert.equal(destroyed, 1);
 });

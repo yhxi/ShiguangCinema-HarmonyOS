@@ -1,3 +1,4 @@
+import { SearchRequests } from '../api/DirectCms';
 import { RouteParams } from './RouteParams';
 /**
  * 搜索页 —— 服务端聚合搜索 + 直连源并行加速（失败回退服务端）。
@@ -115,6 +116,7 @@ struct SearchPage {
   private prefs: Prefs | null = null;
   private source: SearchGroupSource = new SearchGroupSource();
   private searchGeneration: number = 0;
+  private searchRequests: SearchRequests = new SearchRequests();
   private freshResults: SearchItem[] = [];
   private refreshFailed: boolean = false;
   /** 已经搜过的关键词：输入框内容与它不同才给联想，避免结果页被联想条顶掉 */
@@ -122,7 +124,7 @@ struct SearchPage {
   private pool: PoolEntry[] = [];
   private health: Map<string, HealthRecord> = new Map();
 
-  aboutToDisappear(): void { this.active = false; this.searchGeneration++; this.hotGeneration++; }
+  aboutToDisappear(): void { this.searchRequests.cancel(); this.active = false; this.searchGeneration++; this.hotGeneration++; }
 
   onPageShow(): void {
     this.active = true;
@@ -333,6 +335,8 @@ struct SearchPage {
     if (kw === '' || api === null) {
       return;
     }
+    this.searchRequests.cancel();
+    this.searchRequests = new SearchRequests();
     const generation = ++this.searchGeneration;
     this.freshResults = [];
     this.refreshFailed = false;
@@ -414,7 +418,7 @@ struct SearchPage {
       while (generation === this.searchGeneration && next < direct.length) {
         const src = direct[next++];
         try {
-          const list = await this.session.directCms.search(src, kw);
+          const list = await this.session.directCms.search(src, kw, this.searchRequests);
           if (generation !== this.searchGeneration) { return; }
           this.freshResults.push(...list);
           this.applyIncoming(list);
@@ -767,6 +771,7 @@ struct SearchPage {
               this.keyword = v;
               // 清空输入就回到「最近搜索」状态，而不是把上一轮结果留在屏幕上
               if (v.trim() === '') {
+                this.searchRequests.cancel();
                 this.searchGeneration++;
                 this.searching = false;
                 this.searchedKeyword = '';

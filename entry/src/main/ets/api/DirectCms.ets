@@ -34,6 +34,19 @@ function isEligible(src: SourceConfig): boolean {
   return u.includes('/api.php') || u.includes('/provide/vod');
 }
 
+/** 每次搜索独立持有请求；取消不影响详情或其他页面的请求。 */
+export class SearchRequests {
+  private clients: Set<http.HttpRequest> = new Set();
+  cancelled: boolean = false;
+  add(client: http.HttpRequest): void { this.clients.add(client); }
+  remove(client: http.HttpRequest): boolean { return this.clients.delete(client); }
+  cancel(): void {
+    this.cancelled = true;
+    this.clients.forEach((client: http.HttpRequest) => { client.destroy(); });
+    this.clients.clear();
+  }
+}
+
 export class DirectCms {
   private failures: Map<string, FailureState> = new Map();
 
@@ -58,8 +71,12 @@ export class DirectCms {
     this.failures.set(url, state);
   }
 
-  private async getSourceJson(src: SourceConfig, url: string): Promise<JsonObj> {
+  private async getSourceJson(src: SourceConfig, url: string, requests?: SearchRequests): Promise<JsonObj> {
     const client = http.createHttp();
+    if (requests !== undefined) {
+      if (requests.cancelled) { client.destroy(); throw new Error('搜索已取消'); }
+      requests.add(client);
+    }
     try {
       const resp = await client.request(url, {
         method: http.RequestMethod.GET,
@@ -78,10 +95,10 @@ export class DirectCms {
       this.failures.delete(src.url);
       return root;
     } catch (e) {
-      this.recordFailure(src.url);
+      if (requests === undefined || !requests.cancelled) { this.recordFailure(src.url); }
       throw e as Error;
     } finally {
-      client.destroy();
+      if (requests === undefined || requests.remove(client)) { client.destroy(); }
     }
   }
 
@@ -99,8 +116,8 @@ export class DirectCms {
   }
 
   /** 搜索。失败直接抛异常，由调用方决定是否回退服务端。 */
-  async search(src: SourceConfig, keyword: string): Promise<SearchItem[]> {
-    const root = await this.getSourceJson(src, this.buildUrl(src.url, keyword, null));
+  async search(src: SourceConfig, keyword: string, requests?: SearchRequests): Promise<SearchItem[]> {
+    const root = await this.getSourceJson(src, this.buildUrl(src.url, keyword, null), requests);
     const out: SearchItem[] = [];
     const list = getArr(root, 'list');
     if (list === null) {
