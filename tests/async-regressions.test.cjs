@@ -186,3 +186,30 @@ test('cancelling a search destroys only its requests and prevents double destruc
   group.cancel();
   assert.equal(destroyed, 1);
 });
+
+test('skip actions and temporary speed preserve episode and playback state', () => {
+  const src = fs.readFileSync('entry/src/main/ets/pages/Player.ets', 'utf8');
+  const method = (name, next) => src.slice(src.indexOf(`  private ${name}`), src.indexOf(next, src.indexOf(`  private ${name}`))).replace('private ', '');
+  const code = [method('skipIntro()', '\n  private skipOutro'), method('skipOutro()', '\n  /**'),
+    method('applySkipMarks(', '\n  private saveSkipMarks'),
+    method('beginTemporarySpeed()', '\n  private endTemporarySpeed'),
+    method('endTemporarySpeed()', '\n  private setSpeed')].join('\n');
+  const js = ts.transpileModule(`export class Harness { ${code} }`, {compilerOptions:{module:ts.ModuleKind.CommonJS}}).outputText;
+  const context = {exports:{}, media:{PlaybackSpeed:{SPEED_FORWARD_2_00_X:2}}, Date, clearTimeout};
+  vm.runInNewContext(js, context);
+  const h = new context.exports.Harness();
+  Object.assign(h, { isLive:false, playing:true, switching:false, userDragging:false, durMs:600000,
+    marksLoaded:true, introApplied:false, autoIntro:true, introEndMs:90000, resumeMs:0,
+    autoOutro:true, autoNext:false, outroMarkedEpisode:-1, episodeIndex:0, episodes:['a','b'],
+    speedIndex:3, speeds:[0.75,1,1.25,1.5,1.75,2], locked:false, temporarySpeed:false,
+    hudTimer:-1, gestureMessage:'', canControl:()=>true, notify:()=>{}, fmt:()=>'',
+    seekTo:value=>{h.seek=value}, effectiveOutroStart:()=>550000,
+    switchEpisode:()=>{h.episodeIndex++; h.introApplied=false; h.resumeMs=0},
+    player:{setSpeed:value=>{h.appliedSpeed=value}} });
+  h.applySkipMarks(1000); assert.equal(h.seek,90000);
+  h.applySkipMarks(550000); assert.equal(h.episodeIndex,1);
+  h.seek=0; h.applySkipMarks(1000); assert.equal(h.seek,90000);
+  h.beginTemporarySpeed(); assert.equal(h.appliedSpeed,2); assert.equal(h.speedIndex,3);
+  h.endTemporarySpeed(); assert.equal(h.appliedSpeed,1.5); assert.equal(h.speedIndex,3);
+  h.playing=false; h.beginTemporarySpeed(); assert.equal(h.temporarySpeed,false);
+});

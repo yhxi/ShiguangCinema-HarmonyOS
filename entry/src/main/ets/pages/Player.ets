@@ -92,6 +92,8 @@ struct Player {
   private gestureStartTime: number = 0;
   private gestureStartLevel: number = 0;
   private lastGestureUpdate: number = 0;
+  private temporarySpeed: boolean = false;
+  private suppressClickUntil: number = 0;
   private hudTimer: number = -1;
   private sleepTimer: number = -1;
   private introApplied: boolean = false;
@@ -259,6 +261,7 @@ struct Player {
   }
 
   aboutToDisappear(): void {
+    this.endTemporarySpeed();
     this.disposed = true;
     this.playerGeneration++;
     this.saveProgress(true);
@@ -341,6 +344,7 @@ struct Player {
       }
       return;
     }
+    this.endTemporarySpeed();
     const url = this.episodes[this.episodeIndex];
     this.switching = true;
     this.playing = false;
@@ -465,6 +469,7 @@ struct Player {
         this.playing = false;
         this.stopBackgroundTask();
       } else if (state === 'paused') {
+        this.endTemporarySpeed();
         if (this.quota !== null) { this.quota.flush(); }
         this.playing = false;
         this.isPaused = true;
@@ -479,10 +484,7 @@ struct Player {
         this.updateBackgroundSession(false);
         this.stopBackgroundTask();
         if (!this.isLive && this.autoNext && this.episodeIndex < this.episodes.length - 1) {
-          this.episodeIndex += 1;
-          this.curMs = 0;
-          this.durMs = 0;
-          this.setupPlayer();
+          this.switchEpisode(1);
         }
       }
     });
@@ -872,6 +874,8 @@ struct Player {
     this.triedSourceUrls = new Set([this.sourceUrl]);
     this.curMs = 0;
     this.durMs = 0;
+    this.resumeMs = 0;
+    this.resumeRequestedManually = false;
     this.setupPlayer();
   }
 
@@ -1046,7 +1050,7 @@ struct Player {
       if (this.autoIntro && this.introEndMs > 0 && this.introEndMs < this.durMs &&
         Math.max(time, this.resumeMs) < this.introEndMs - 1500) { this.seekTo(this.introEndMs); return; }
     }
-    if (this.autoOutro && this.autoNext && this.outroMarkedEpisode !== this.episodeIndex &&
+    if (this.autoOutro && this.outroMarkedEpisode !== this.episodeIndex &&
       this.episodeIndex < this.episodes.length - 1) {
       const start = this.effectiveOutroStart();
       if (start > 0 && time >= start) { this.switchEpisode(1); }
@@ -1147,8 +1151,31 @@ struct Player {
     this.showControls = !this.pureFullscreen;
   }
 
+  private beginTemporarySpeed(): void {
+    if (this.locked || this.isLive || !this.playing || !this.canControl() || this.temporarySpeed) { return; }
+    try {
+      (this.player as media.AVPlayer).setSpeed(media.PlaybackSpeed.SPEED_FORWARD_2_00_X);
+      this.temporarySpeed = true;
+      this.suppressClickUntil = Date.now() + 1000;
+      this.gestureMessage = '2.0× 快进中';
+      if (this.hudTimer >= 0) { clearTimeout(this.hudTimer); this.hudTimer = -1; }
+    } catch (e) { this.notify('当前视频不支持 2 倍速'); }
+  }
+
+  private endTemporarySpeed(): void {
+    if (!this.temporarySpeed) { return; }
+    this.temporarySpeed = false;
+    this.suppressClickUntil = Date.now() + 500;
+    if (this.player !== null && this.canControl()) {
+      try { this.player.setSpeed(this.speeds[this.speedIndex]); }
+      catch (e) { this.notify('无法恢复播放倍速'); }
+    }
+    this.gestureMessage = '';
+  }
+
   private setSpeed(index: number): void {
     if (this.isLive || !this.canControl()) { this.notify('视频准备完成后可调整倍速'); return; }
+    this.endTemporarySpeed();
     try {
       (this.player as media.AVPlayer).setSpeed(this.speeds[index]);
       this.speedIndex = index;
@@ -1265,7 +1292,7 @@ struct Player {
       items.push({ label: `跳到片头结束 ${this.fmt(this.introEndMs)}`, action: () => { this.skipIntro(); this.activeMenu = ''; } });
       items.push({ label: `将当前位置 ${this.fmt(this.curMs)} 记为片头结束`, action: () => {
         if (!this.canControl() || this.curMs <= 0) { return; }
-        this.introEndMs = this.curMs; this.introApplied = true; this.saveSkipMarks(); this.notify('已保存本剧片头位置');
+        this.introEndMs = this.curMs; this.autoIntro = true; this.introApplied = true; this.saveSkipMarks(); this.notify('已保存本剧片头位置');
       } });
       items.push({ label: '将当前位置记为片尾开始', action: () => {
         if (!this.canControl() || this.curMs <= 0) { return; }
@@ -1441,7 +1468,7 @@ struct Player {
       Column()
         .width('100%').height('100%')
         .onClick((event: ClickEvent) => {
-          if (this.locked) { return; }
+          if (this.locked || Date.now() < this.suppressClickUntil) { return; }
           const centerX = this.viewportWidth / 2;
           const centerY = this.viewportHeight / 2;
           // 用组件内坐标（x/y）而不是窗口坐标（displayX/displayY），与 viewport 尺寸同源
@@ -1450,11 +1477,16 @@ struct Player {
             this.togglePlay();
           } else { this.scheduleHide(); }
         })
-        .gesture(PanGesture({ fingers: 1, direction: PanDirection.All, distance: 12 })
-          .onActionStart((event: GestureEvent) => { this.beginGesture(event); })
-          .onActionUpdate((event: GestureEvent) => { this.updateGesture(event); })
-          .onActionEnd((event: GestureEvent) => { this.endGesture(event); })
-          .onActionCancel(() => { this.cancelGesture(); }))
+        .gesture(GestureGroup(GestureMode.Exclusive,
+          PanGesture({ fingers: 1, direction: PanDirection.All, distance: 12 })
+            .onActionStart((event: GestureEvent) => { this.beginGesture(event); })
+            .onActionUpdate((event: GestureEvent) => { this.updateGesture(event); })
+            .onActionEnd((event: GestureEvent) => { this.endGesture(event); })
+            .onActionCancel(() => { this.cancelGesture(); }),
+          LongPressGesture({ fingers: 1, duration: 500 })
+            .onAction(() => { this.beginTemporarySpeed(); })
+            .onActionEnd(() => { this.endTemporarySpeed(); })
+            .onActionCancel(() => { this.endTemporarySpeed(); })))
 
       if (this.gestureMessage !== '') {
         Text(this.gestureMessage).fontSize(17).fontColor('#FFFFFF')
@@ -1517,7 +1549,9 @@ struct Player {
             this.toolbarButton(this.isLive ? '上台' : '上集', this.episodeIndex > 0, () => { this.switchEpisode(-1); })
             this.toolbarButton(this.isLive ? '下台' : '下集', this.episodeIndex < this.episodes.length - 1, () => { this.switchEpisode(1); })
             if (!this.isLive) {
-              this.toolbarButton(`倍速 ${this.speedLabels[this.speedIndex]}`, true, () => { this.activeMenu = 'speed'; })
+              Text(`倍速 ${this.speedLabels[this.speedIndex]}`).fontSize(12).fontColor('#FFFFFF')
+                .height(42).layoutWeight(1).textAlign(TextAlign.Center).maxLines(1)
+                .onClick(() => { this.activeMenu = 'speed'; })
             }
             this.toolbarButton('选集', true, () => { this.showEpisodes = true; })
             // 换源常驻底部（v1.3.11）；清晰度收进「更多」，底部只留最常用的操作
