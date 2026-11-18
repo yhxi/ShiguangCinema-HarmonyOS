@@ -33,6 +33,7 @@ export interface VideoInfo {
 
 export interface Detail {
   episodes: string[];
+  episodeLabels?: string[];
   info: VideoInfo;
 }
 

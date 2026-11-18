@@ -6,6 +6,7 @@ export interface RouteParams {
   resumeKey?: string;
   title?: string;
   episodes?: string;
+  episodeLabels?: string;
   index?: string;
   cover?: string;
   resumeMs?: string;

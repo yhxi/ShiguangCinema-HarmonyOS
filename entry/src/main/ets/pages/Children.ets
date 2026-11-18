@@ -219,7 +219,7 @@ struct Children {
     Column({ space: 6 }) {
       Stack() {
         if (card.cover !== '') {
-          PosterImage({ url: card.cover, proxy: this.proxyOf(card.cover), cookie: this.cookie(),
+          PosterImage({ url: card.cover, fallbackLabel: card.title, proxy: this.proxyOf(card.cover), cookie: this.cookie(),
             posterHeight: 168, retryToken: card.retryToken })
         } else {
           // 没有核验封面：用片名首字 + 浅绿底做插画兜底，不留“暂无封面”的空白
@@ -363,7 +363,7 @@ struct Children {
               ForEach(this.coverCandidates, (item: SearchItem) => {
                 ListItem() {
                   Row({ space: 12 }) {
-                    PosterImage({ url: item.pic, proxy: this.proxyOf(item.pic), cookie: this.cookie(), posterHeight: 90 })
+                    PosterImage({ url: item.pic, fallbackLabel: item.name, proxy: this.proxyOf(item.pic), cookie: this.cookie(), posterHeight: 90 })
                       .width(60).height(90)
                     Column({ space: 4 }) {
                       Text(item.name).fontSize(14).fontColor(Theme.KID_INK).maxLines(2)

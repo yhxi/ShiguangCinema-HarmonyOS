@@ -37,6 +37,7 @@ class PosterCache {
   private static diskDir: string = '';
   private static diskBroken: boolean = false;
   private static diskWrites: number = 0;
+  private static diskQueue: Promise<void> = Promise.resolve();
   private static readonly MEMORY_LIMIT: number = 48;
   /** 张数兜底：单张海报通常几十 KB，200 MB 大约能放两三千张，这里再压一道防异常 */
   private static readonly DISK_LIMIT: number = 3000;
@@ -132,7 +133,7 @@ class PosterCache {
       // 2) 网络（直连失败再走代理）
       let result: image.PixelMap | null = null;
       try { result = await PosterCache.fetch(url, false, ''); } catch (e) { /* Try proxy. */ }
-      if (result === null && proxy !== '') {
+      if (result === null && proxy !== '' && proxy !== url) {
         try { result = await PosterCache.fetch(proxy, true, cookie); } catch (e) { /* Leave placeholder. */ }
       }
       if (result !== null && generation === PosterCache.generation) {
@@ -194,7 +195,7 @@ class PosterCache {
     if (PosterCache.diskBroken || PosterCache.diskDir === '') { return null; }
     const path = PosterCache.diskPath(url);
     try {
-      if (!fs.accessSync(path)) { return null; }
+      if (!(await fs.access(path))) { return null; }
       const source = image.createImageSource(path);
       try {
         return await source.createPixelMap({ desiredSize: { width: 360, height: 540 } });
@@ -207,33 +208,33 @@ class PosterCache {
 
   private static writeDisk(url: string, bitmap: image.PixelMap, generation: number): void {
     if (PosterCache.diskBroken || PosterCache.diskDir === '') { return; }
-    // 打包 + 落盘是纯后台动作，失败也不影响界面
     const packer = image.createImagePacker();
-    packer.packToData(bitmap, PACK_OPTIONS)
-      .then((data: ArrayBuffer) => {
+    packer.packToData(bitmap, PACK_OPTIONS).then((data: ArrayBuffer) => {
+      PosterCache.diskQueue = PosterCache.diskQueue.then(async () => {
         if (generation !== PosterCache.generation) { return; }
-        try {
-          fs.mkdirSync(PosterCache.diskDir, true);
-          const path = PosterCache.diskPath(url);
-          const file = fs.openSync(path, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
-          try { fs.writeSync(file.fd, data); } finally { fs.closeSync(file); }
-          PosterCache.diskWrites++;
-          if (PosterCache.diskWrites % 20 === 0) { PosterCache.trimDisk(); }
-        } catch (e) { /* 磁盘写失败只影响下次启动的离线体验 */ }
-      })
-      .catch(() => {});
+        const dir = PosterCache.diskDir;
+        if (!(await fs.access(dir).catch(() => false))) { await fs.mkdir(dir, true); }
+        if (generation !== PosterCache.generation) { return; }
+        const file = await fs.open(PosterCache.diskPath(url),
+          fs.OpenMode.WRITE_ONLY | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
+        try { await fs.write(file.fd, data); } finally { await fs.close(file); }
+        PosterCache.diskWrites++;
+        if (PosterCache.diskWrites % 20 === 0) { await PosterCache.trimDisk(dir, generation); }
+      }).catch(() => {});
+    }).catch(() => {}).finally(() => { packer.release().catch(() => {}); });
   }
 
   /** 磁盘超过 200 MB（或张数兜底）时按修改时间删最旧的，留 10 MB 余量避免每次写都触发 */
-  private static trimDisk(): void {
+  private static async trimDisk(dir: string, generation: number): Promise<void> {
     try {
-      const names: string[] = fs.listFileSync(PosterCache.diskDir);
+      const names: string[] = await fs.listFile(dir);
       if (names.length === 0) { return; }
       const stats: DiskFileInfo[] = [];
       let total = 0;
       for (const name of names) {
         try {
-          const st = fs.statSync(`${PosterCache.diskDir}/${name}`);
+          if (generation !== PosterCache.generation) { return; }
+          const st = await fs.stat(`${dir}/${name}`);
           const size = st.size > 0 ? st.size : 0;
           total += size;
           const info: DiskFileInfo = { name: name, mtime: st.mtime, size: size };
@@ -246,7 +247,8 @@ class PosterCache {
       for (const item of stats) {
         if (count <= PosterCache.DISK_LIMIT && total <= PosterCache.DISK_BYTES_TRIM_TO) { break; }
         try {
-          fs.unlinkSync(`${PosterCache.diskDir}/${item.name}`);
+          if (generation !== PosterCache.generation) { return; }
+          await fs.unlink(`${dir}/${item.name}`);
           total -= item.size;
           count--;
         } catch (e) { /* Already gone. */ }
@@ -277,36 +279,78 @@ class PosterCache {
   }
 }
 
+export interface PosterLocation {
+  url: string;
+  proxy: string;
+  cookie: string;
+}
+
 export function clearPosterCache(): void { PosterCache.clear(); }
 export function retryPosterCache(): void { PosterCache.clearFailures(); }
 
 @Component
 export struct PosterImage {
   @Prop @Watch('loadPoster') url: string = '';
-  @Prop proxy: string = '';
+  @Prop @Watch('loadPoster') proxy: string = '';
+  @Prop @Watch('loadPoster') fallbackLabel: string = '';
+  recoverPoster: ((refresh: boolean) => Promise<PosterLocation[]>) | null = null;
+  onPosterRecovered: ((url: string) => void) | null = null;
   @Prop @Watch('loadPoster') cookie: string = '';
   @Prop posterHeight: number = 240;
   @Prop @Watch('loadPoster') retryToken: number = 0;
   @State bitmap: image.PixelMap | null = null;
   private active: boolean = true;
+  private loadGeneration: number = 0;
+  private displayedLabel: string = '';
+  private displayedUrl: string = '';
 
   aboutToAppear(): void { this.active = true; this.loadPoster(); }
 
-  private loadPoster(): void {
-    if (this.url === '') { this.bitmap = null; return; }
-    this.bitmap = null;
+  private async loadPoster(): Promise<void> {
+    const generation = ++this.loadGeneration;
     const requested = this.url;
-    PosterCache.get(getContext(this), requested, this.proxy, this.cookie).then((bitmap: image.PixelMap | null) => {
-      if (this.active && this.url === requested) { this.bitmap = bitmap; }
-    }).catch(() => {});
+    const label = this.fallbackLabel.trim();
+    const sameTitle = label !== '' && label === this.displayedLabel;
+    const sameUnlabelledUrl = label === '' && this.displayedLabel === '' && requested === this.displayedUrl;
+    if (!sameTitle && !sameUnlabelledUrl) { this.bitmap = null; }
+    try {
+      let bitmap = requested === '' ? null : await PosterCache.get(getContext(this), requested, this.proxy, this.cookie);
+      if (!this.active || generation !== this.loadGeneration) { return; }
+      if (bitmap === null && this.bitmap === null && this.recoverPoster !== null) {
+        const attempted = new Set<string>([requested]);
+        for (const refresh of [false, true]) {
+          const candidates = await this.recoverPoster(refresh);
+          for (const recovered of candidates) {
+            if (!this.active || generation !== this.loadGeneration) { return; }
+            if (recovered.url === '' || attempted.has(recovered.url)) { continue; }
+            attempted.add(recovered.url);
+            bitmap = await PosterCache.get(getContext(this), recovered.url, recovered.proxy, recovered.cookie);
+            if (!this.active || generation !== this.loadGeneration) { return; }
+            if (bitmap !== null) {
+              if (this.onPosterRecovered !== null) { this.onPosterRecovered(recovered.url); }
+              break;
+            }
+          }
+          if (!this.active || generation !== this.loadGeneration || bitmap !== null) { break; }
+        }
+      }
+      if (this.active && generation === this.loadGeneration && bitmap !== null) {
+        this.displayedLabel = label;
+        this.displayedUrl = requested;
+        this.bitmap = bitmap;
+      }
+    } catch (e) { /* Keep the fallback artwork. */ }
   }
 
-  aboutToDisappear(): void { this.active = false; }
+  aboutToDisappear(): void { this.active = false; this.loadGeneration++; }
 
   build() {
     Stack() {
       if (this.bitmap !== null) {
         Image(this.bitmap).width('100%').height('100%').objectFit(ImageFit.Cover)
+      } else {
+        Text(this.fallbackLabel.trim() === '' ? '▧' : this.fallbackLabel.trim().substring(0, 1))
+          .fontSize(23).fontWeight(FontWeight.Medium).fontColor('#48665A')
       }
     }.width('100%').height(this.posterHeight).backgroundColor('#DCE8DF').borderRadius(13).clip(true)
   }

@@ -1,3 +1,4 @@
+import { SearchRequests } from './DirectCms';
 /**
  * LibreTV HTTP 契约（自 Android 版 Api.kt 移植，契约逐字段对齐）：
  *
@@ -53,9 +54,12 @@ export class Api {
     path: string,
     method: string,
     body: string | null,
-    readTimeoutMs: number
+    readTimeoutMs: number,
+    requests?: SearchRequests
   ): Promise<string> {
+    if (requests?.cancelled) { throw new Error('搜索已取消'); }
     const client = http.createHttp();
+    requests?.add(client);
     try {
       const header: Record<string, string> = { 'Accept': 'application/json' };
       if (this.cookie !== '') {
@@ -76,6 +80,7 @@ export class Api {
         options.extraData = body;
       }
       const resp = await client.request(this.baseUrl + path, options);
+      if (requests?.cancelled) { throw new Error('搜索已取消'); }
       // 抓 Set-Cookie（LibreTV 只发一条 ltv_session）
       const headers = resp.header as Record<string, Object>;
       if (headers !== undefined && headers !== null) {
@@ -103,6 +108,7 @@ export class Api {
       }
       return resp.result as string;
     } catch (e) {
+      if (requests?.cancelled) { throw new Error('搜索已取消'); }
       const err = e as BusinessError;
       const phase = path === '/api/status' ? '查询服务器状态' :
         (path === '/api/auth' ? '验证密码' : '请求服务器');
@@ -114,7 +120,7 @@ export class Api {
       }
       throw new Error(`${phase}失败：${err.message ?? '未知错误'}${err.code ? `（${err.code}）` : ''}`);
     } finally {
-      client.destroy();
+      if (requests === undefined || requests.remove(client)) { client.destroy(); }
     }
   }
 
@@ -200,7 +206,7 @@ export class Api {
     return this.status();
   }
 
-  async search(keyword: string, sources: SourceConfig[]): Promise<SearchResult> {
+  async search(keyword: string, sources: SourceConfig[], requests?: SearchRequests): Promise<SearchResult> {
     const srcArr: Object[] = [];
     for (const src of sources) {
       const parsed: Object = JSON.parse(sourceToJson(src)) as Object;
@@ -211,7 +217,7 @@ export class Api {
       'sources': srcArr,
       'filterAdult': true
     };
-    const text = await this.postJson('/api/search', JSON.stringify(payload), SEARCH_READ_TIMEOUT_MS);
+    const text = await this.request('/api/search', 'POST', JSON.stringify(payload), SEARCH_READ_TIMEOUT_MS, requests);
     const root = parseObj(text);
     const items: SearchItem[] = [];
     const list = getArr(root, 'list');
@@ -248,12 +254,18 @@ export class Api {
       throw new Error(s(root['error'], '获取详情失败'));
     }
     const urls: string[] = [];
+    const episodeLabels: string[] = [];
     const eps = getArr(root, 'episodes');
+    const labels = getArr(root, 'episodeLabels');
     if (eps !== null) {
-      for (const ep of eps) {
-        if (typeof ep === 'string' && (ep as string) !== '') {
-          urls.push(ep as string);
-        }
+      for (let i = 0; i < eps.length; i++) {
+        const ep = s(eps[i]).trim();
+        if (ep === '') { continue; }
+        const separator = ep.indexOf('$');
+        const labelled = separator >= 0 && /^https?:\/\//i.test(ep.substring(separator + 1));
+        urls.push(labelled ? ep.substring(separator + 1) : ep);
+        episodeLabels.push(labelled ? ep.substring(0, separator).trim() :
+          (labels !== null && i < labels.length ? s(labels[i]) : ''));
       }
     }
     let info: VideoInfo = {
@@ -271,7 +283,7 @@ export class Api {
         actor: s(vi['actor'])
       };
     }
-    return { episodes: urls, info: info };
+    return { episodes: urls, episodeLabels: episodeLabels, info: info };
   }
 
   async douban(type: string, tag: string, pageStart: number, pageSize: number): Promise<DoubanItem[]> {

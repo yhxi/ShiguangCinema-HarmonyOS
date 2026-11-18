@@ -11,7 +11,7 @@
 import { http } from '@kit.NetworkKit';
 import { Detail, SearchItem, SourceConfig, VideoInfo } from './Models';
 import { JsonObj, asArr, asObj, getArr, getObj, parseObj, s } from './JsonUtil';
-import { parsePlayUrls } from './PlayUrls';
+import { parsePlayLine } from './PlayUrls';
 
 const UA = 'okhttp/3.12.0';
 const CONNECT_TIMEOUT_MS = 3500;
@@ -158,7 +158,8 @@ export class DirectCms {
     if (item === null) {
       throw new Error('详情为空');
     }
-    const urls = parsePlayUrls(s(item['vod_play_url']), s(item['vod_play_from']));
+    const line = parsePlayLine(s(item['vod_play_url']), s(item['vod_play_from']));
+    const urls = line.urls;
     if (urls.length === 0) {
       // 区分"确实没有地址"和"只有网页播放器地址"，后者给用户更明确的提示
       throw new Error(s(item['vod_play_url']).indexOf('http') >= 0
@@ -173,7 +174,7 @@ export class DirectCms {
       area: s(item['vod_area']),
       actor: s(item['vod_actor'])
     };
-    return { episodes: urls, info: info };
+    return { episodes: urls, episodeLabels: line.episodeLabels, info: info };
   }
 }
 

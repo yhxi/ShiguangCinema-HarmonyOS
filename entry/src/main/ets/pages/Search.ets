@@ -404,7 +404,7 @@ struct SearchPage {
     }
     const initialFallback = fallback.splice(0, fallback.length);
     const serverTask: Promise<void> = initialFallback.length > 0
-      ? api.search(kw, initialFallback).then((r) => {
+      ? api.search(kw, initialFallback, this.searchRequests).then((r) => {
         if (generation === this.searchGeneration) {
           this.freshResults.push(...r.items);
           if (r.failures > 0) { this.refreshFailed = true; }
@@ -434,7 +434,7 @@ struct SearchPage {
     }
     if (fallback.length > 0) {
       try {
-        const result = await api.search(kw, fallback);
+        const result = await api.search(kw, fallback, this.searchRequests);
         if (generation !== this.searchGeneration) { return; }
         this.freshResults.push(...result.items);
         if (result.failures > 0) { this.refreshFailed = true; }
@@ -656,7 +656,7 @@ struct SearchPage {
     Row({ space: 10 }) {
       Row({ space: 12 }) {
         Stack() {
-          PosterImage({ url: g.items[0].pic, proxy: this.posterProxy(g.items[0].pic),
+          PosterImage({ url: g.items[0].pic, fallbackLabel: g.title, proxy: this.posterProxy(g.items[0].pic),
             cookie: this.session.api !== null ? this.session.api.currentCookie() : '',
             posterHeight: 90 })
         }.width(64).height(90)

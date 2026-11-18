@@ -122,7 +122,7 @@ struct Favorites {
               Row({ space: 12 }) {
                 Stack() {
                   PosterImage({
-                    url: e.cover, proxy: this.proxyImg(e.cover),
+                    url: e.cover, fallbackLabel: e.title, proxy: this.proxyImg(e.cover),
                     cookie: this.session.api !== null ? this.session.api.currentCookie() : '',
                     posterHeight: 90
                   })

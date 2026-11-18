@@ -321,7 +321,7 @@ struct Index {
 
   /** 第 N 集 · 已看 X%；不足 1% 说「刚开始看」，时长未知退回已播时间（v1.3.13/v1.3.14） */
   private recentLabel(entry: WatchEntry): string {
-    const ep = `第 ${entry.episodeIndex + 1} 集`;
+    const ep = entry.episodeLabel || `第 ${entry.episodeIndex + 1} 集`;
     if (entry.durationMs <= 0) {
       return entry.positionMs > 0 ? `${ep} · 已看 ${this.shortTime(entry.positionMs)}` : ep;
     }
@@ -762,7 +762,7 @@ struct Index {
               ForEach(this.recent, (entry: WatchEntry) => {
                 Column({ space: 6 }) {
                   Stack({ alignContent: Alignment.Bottom }) {
-                    PosterImage({ url: entry.cover,
+                    PosterImage({ url: entry.cover, fallbackLabel: entry.title,
                       proxy: this.proxyImg(entry.cover),
                       cookie: this.session.api !== null ? this.session.api.currentCookie() : '',
                       posterHeight: 168 })
@@ -808,7 +808,7 @@ struct Index {
           ForEach(this.doubanList, (d: DoubanItem) => {
             GridCol() {
               Column({ space: 5 }) {
-                PosterImage({ url: d.cover, proxy: this.session.api !== null ? this.session.api.imageUrl(d.cover) : '',
+                PosterImage({ url: d.cover, fallbackLabel: d.title, proxy: this.session.api !== null ? this.session.api.imageUrl(d.cover) : '',
                   cookie: this.session.api !== null ? this.session.api.currentCookie() : '', posterHeight: 240 })
                 Text(d.title).fontSize(16).fontWeight(FontWeight.Bold).fontColor(Theme.WALL_TITLE)
                   .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%')

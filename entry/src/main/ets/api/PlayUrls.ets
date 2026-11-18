@@ -12,14 +12,25 @@ export function isWebPlayerUrl(url: string): boolean {
 }
 
 /** Select a native media line rather than the provider's web player line. */
+export interface PlayLine {
+  urls: string[];
+  episodeLabels: string[];
+}
+
 export function parsePlayUrls(raw: string, playFrom: string = ''): string[] {
-  if (raw.trim() === '') { return []; }
+  return parsePlayLine(raw, playFrom).urls;
+}
+
+export function parsePlayLine(raw: string, playFrom: string = ''): PlayLine {
+  const empty: PlayLine = { urls: [], episodeLabels: [] };
+  if (raw.trim() === '') { return empty; }
   const lines = raw.split('$$$');
   const labels = playFrom.toLowerCase().split('$$$');
-  let selected: string[] = [];
+  let selected: PlayLine = empty;
   let bestScore = -1;
   for (let i = 0; i < lines.length; i++) {
     const urls: string[] = [];
+    const episodeLabels: string[] = [];
     let mediaCount = 0;
     let webCount = 0;
     for (const part of lines[i].split('#')) {
@@ -28,6 +39,7 @@ export function parsePlayUrls(raw: string, playFrom: string = ''): string[] {
       const url = (separator >= 0 ? segment.substring(separator + 1) : segment).trim();
       if (!/^https?:\/\//i.test(url)) { continue; }
       urls.push(url);
+      episodeLabels.push(separator >= 0 ? segment.substring(0, separator).trim() : '');
       if (MEDIA_EXT.test(url)) { mediaCount++; }
       else if (isWebPlayerUrl(url)) { webCount++; }
     }
@@ -39,17 +51,17 @@ export function parsePlayUrls(raw: string, playFrom: string = ''): string[] {
       webCount / urls.length * 1500;
     if (score > bestScore) {
       bestScore = score;
-      selected = urls;
+      selected = { urls: urls, episodeLabels: episodeLabels };
     }
   }
   // 所有线路都是网页播放器地址时返回空：让上层提示"没有可播放的地址"，
   // 而不是把 HTML 页面丢给 AVPlayer 报一个含糊的播放失败。
-  if (selected.length > 0) {
+  if (selected.urls.length > 0) {
     let allWeb = true;
-    for (const url of selected) {
+    for (const url of selected.urls) {
       if (!isWebPlayerUrl(url)) { allWeb = false; break; }
     }
-    if (allWeb) { return []; }
+    if (allWeb) { return empty; }
   }
   return selected;
 }

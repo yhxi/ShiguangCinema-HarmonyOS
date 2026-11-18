@@ -31,6 +31,7 @@ export interface WatchEntry {
   title: string;
   cover: string;
   episodeIndex: number;
+  episodeLabel?: string;
   episodeCount: number;
   /** 毫秒 */
   positionMs: number;
@@ -332,6 +333,7 @@ export class Prefs {
             title: s(o['title']),
             cover: s(o['cover']),
             episodeIndex: n(o['episodeIndex']),
+            episodeLabel: s(o['episodeLabel']),
             episodeCount: n(o['episodeCount']),
             positionMs: n(o['positionMs']),
             durationMs: n(o['durationMs']),
@@ -372,6 +374,7 @@ export class Prefs {
     const list = this.historyCache as WatchEntry[];
     const idx = list.findIndex((e: WatchEntry) => e.key === entry.key);
     if (idx >= 0) {
+      if (entry.cover.trim() === '') { entry.cover = list[idx].cover; }
       list.splice(idx, 1);
     }
     list.unshift(entry);
@@ -379,19 +382,18 @@ export class Prefs {
     while (list.length > 100) {
       list.pop();
     }
-    const arr: Object[] = [];
-    for (const e of list) {
-      const o: Record<string, Object> = {
-        'key': e.key, 'serverUrl': e.serverUrl, 'sourceUrl': e.sourceUrl,
-        'vodId': e.vodId, 'title': e.title, 'cover': e.cover,
-        'episodeIndex': e.episodeIndex, 'episodeCount': e.episodeCount,
-        'positionMs': e.positionMs, 'durationMs': e.durationMs, 'updatedAt': e.updatedAt
-      };
-      arr.push(o as Object);
-    }
-    const root: Record<string, Object> = { 'list': arr as Object };
-    await (this.store as preferences.Preferences).put(KEY_HISTORY, JSON.stringify(root));
-    await (this.store as preferences.Preferences).flush();
+    await this.putEntryList(KEY_HISTORY, list);
+  }
+
+  async updateWatchCover(key: string, previous: string, cover: string): Promise<void> {
+    return this.enqueueHistory(async () => {
+      if (this.historyCache === null) { await this.loadHistoryFromDisk(); }
+      const list = this.historyCache as WatchEntry[];
+      const entry = list.find((item: WatchEntry) => item.key === key);
+      if (entry === undefined || entry.cover !== previous || cover === '' || cover === previous) { return; }
+      entry.cover = cover;
+      await this.putEntryList(KEY_HISTORY, list);
+    });
   }
 
   async clearHistory(): Promise<void> {
@@ -445,6 +447,7 @@ export class Prefs {
         title: s(o['title']),
         cover: s(o['cover']),
         episodeIndex: n(o['episodeIndex']),
+        episodeLabel: s(o['episodeLabel']),
         episodeCount: n(o['episodeCount']),
         positionMs: n(o['positionMs']),
         durationMs: n(o['durationMs']),
@@ -606,7 +609,7 @@ function entryToObj(e: WatchEntry): Record<string, Object> {
   return {
     'key': e.key, 'serverUrl': e.serverUrl, 'sourceUrl': e.sourceUrl,
     'vodId': e.vodId, 'title': e.title, 'cover': e.cover,
-    'episodeIndex': e.episodeIndex, 'episodeCount': e.episodeCount,
+    'episodeIndex': e.episodeIndex, 'episodeLabel': e.episodeLabel ?? '', 'episodeCount': e.episodeCount,
     'positionMs': e.positionMs, 'durationMs': e.durationMs, 'updatedAt': e.updatedAt
   };
 }

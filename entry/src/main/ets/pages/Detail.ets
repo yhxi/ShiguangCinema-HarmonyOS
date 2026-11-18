@@ -32,6 +32,7 @@ struct DetailPage {
   @State errorMsg: string = '';
   @State cacheNotice: string = '';
   @State episodes: string[] = [];
+  private episodeLabels: string[] = [];
   @State info: Record<string, string> = {
     'title': '', 'cover': '', 'desc': '', 'remarks': '', 'year': '', 'area': '', 'actor': ''
   };
@@ -110,11 +111,13 @@ struct DetailPage {
     if (this.vodId === '' || this.sourceUrl === '') {
       return false;
     }
-    const urls = EpisodeCache.get(getContext(this), this.session.serverUrl, this.sourceUrl, this.vodId, '');
-    if (urls === null) {
+    const record = EpisodeCache.getRecord(getContext(this), this.session.serverUrl, this.sourceUrl, this.vodId, '');
+    if (record === null) {
       return false;
     }
+    const urls = record.urls.slice();
     this.episodes = urls;
+    this.episodeLabels = record.labels ?? [];
     if (this.lastWatch !== null && this.lastWatch.episodeIndex >= 0 &&
       this.lastWatch.episodeIndex < urls.length) {
       this.selected = this.lastWatch.episodeIndex;
@@ -203,6 +206,7 @@ struct DetailPage {
   private applyDetail(d: Detail, fresh: boolean = true): void {
     if (fresh) { this.cacheNotice = ''; }
     this.episodes = d.episodes;
+    this.episodeLabels = d.episodeLabels ?? [];
     this.info = {
       'title': d.info.title !== '' ? d.info.title : this.info['title'],
       'cover': d.info.cover !== '' ? d.info.cover : this.info['cover'],
@@ -216,7 +220,7 @@ struct DetailPage {
     }
     if (fresh) {
       DETAIL_CACHE.set(`${this.session.serverUrl}|${this.sourceUrl}|${this.vodId}`, { detail: d, at: Date.now() });
-      EpisodeCache.put(getContext(this), this.session.serverUrl, this.sourceUrl, this.vodId, d.episodes);
+      EpisodeCache.put(getContext(this), this.session.serverUrl, this.sourceUrl, this.vodId, d.episodes, this.episodeLabels);
     }
     // 片名以详情为准，拿到后再判断是否受儿童额度管理
     this.refreshKidState().catch(() => {});
@@ -257,6 +261,7 @@ struct DetailPage {
       url: 'pages/Player',
       params: {
         'episodes': JSON.stringify(this.episodes),
+        'episodeLabels': JSON.stringify(this.episodeLabels),
         'index': index.toString(),
         'title': this.info['title'],
         'cover': this.info['cover'],
@@ -314,7 +319,7 @@ struct DetailPage {
         Column({ space: 10 }) {
           if (this.info['title'] !== '') {
             Row({ space: 14 }) {
-              PosterImage({ url: this.info['cover'], proxy: this.proxyImg(this.info['cover']),
+              PosterImage({ url: this.info['cover'], fallbackLabel: this.info['title'], proxy: this.proxyImg(this.info['cover']),
                 cookie: this.session.api !== null ? this.session.api.currentCookie() : '', posterHeight: 158 })
                 .width(108).height(158)
               Text(this.info['title']).fontSize(21).fontWeight(FontWeight.Bold).fontColor(Theme.INK)
@@ -338,7 +343,7 @@ struct DetailPage {
           Column({ space: 14 }) {
             Row({ space: 14 }) {
               Stack() {
-                PosterImage({ url: this.info['cover'], proxy: this.proxyImg(this.info['cover']),
+                PosterImage({ url: this.info['cover'], fallbackLabel: this.info['title'], proxy: this.proxyImg(this.info['cover']),
                   cookie: this.session.api !== null ? this.session.api.currentCookie() : '',
                   posterHeight: 158 })
               }.width(108).height(158)

@@ -1,3 +1,4 @@
+import { matchEpisodeIndex } from '../common/EpisodeMatch';
 /**
  * 播放页 —— AVPlayer + XComponent：
  *   · m3u8/HLS 播放
@@ -104,6 +105,8 @@ struct Player {
   private player: media.AVPlayer | null = null;
   private xcController: XComponentController = new XComponentController();
   private episodes: string[] = [];
+  private episodeLabels: string[] = [];
+  private saveNextOnStart: boolean = false;
   /** 选集面板的数据源：上千集不能一次性建行 */
   private episodeSource: EpisodeListSource = new EpisodeListSource();
   private sourceUrl: string = '';
@@ -147,6 +150,9 @@ struct Player {
   private backgroundTaskActive: boolean = false;
   private previousOrientation: window.Orientation = window.Orientation.UNSPECIFIED;
   private previousKeepScreenOn: boolean = false;
+  private effectiveSpeed: number = 1;
+  private backgroundUpdate: number = 0;
+  private speedRates: number[] = [0.75, 1, 1.25, 1.5, 1.75, 2];
   private speeds: media.PlaybackSpeed[] = [media.PlaybackSpeed.SPEED_FORWARD_0_75_X,
     media.PlaybackSpeed.SPEED_FORWARD_1_00_X, media.PlaybackSpeed.SPEED_FORWARD_1_25_X,
     media.PlaybackSpeed.SPEED_FORWARD_1_50_X, media.PlaybackSpeed.SPEED_FORWARD_1_75_X,
@@ -188,6 +194,12 @@ struct Player {
     if (this.episodeIndex < 0 || this.episodeIndex >= this.episodes.length) {
       this.episodeIndex = 0;
     }
+    try {
+      const labels = JSON.parse(params['episodeLabels'] ?? '[]') as Object[];
+      if (Array.isArray(labels) && labels.length === this.episodes.length) {
+        this.episodeLabels = labels.map((label: Object) => typeof label === 'string' ? label as string : '');
+      }
+    } catch (e) { /* Older playback routes may not contain episode labels. */ }
     this.episodeSource.setItems(this.episodes);
     if (isNaN(this.resumeMs)) {
       this.resumeMs = 0;
@@ -352,6 +364,7 @@ struct Player {
     this.switching = true;
     this.playing = false;
     this.firstFrameSeen = false;
+    this.effectiveSpeed = 1;
     this.recoverySeekPending = false;
     this.introSeekPending = false;
     this.buffering = false;
@@ -500,7 +513,7 @@ struct Player {
         this.updateBackgroundSession(false);
         this.stopBackgroundTask();
         if (!this.isLive && this.autoNext && this.episodeIndex < this.episodes.length - 1) {
-          this.switchEpisode(1);
+          this.switchEpisode(1, true);
         }
       }
     });
@@ -531,6 +544,7 @@ struct Player {
     p.on('startRenderFrame', () => {
       if (this.disposed || generation !== this.playerGeneration || this.recoverySeekPending || this.introSeekPending) { return; }
       this.firstFrameSeen = true;
+      this.saveStartedEpisode();
       // 起播成功后重置自愈状态：之后的失败可以再走一轮"重试 → 换源"
       this.sameUrlRetried = false;
       this.sourceSwitchTried = false;
@@ -570,6 +584,7 @@ struct Player {
         this.applySkipMarks(time);
         if (time > 0 && p.width > 0 && !this.lookingForSource) {
           this.firstFrameSeen = true;
+          this.saveStartedEpisode();
           this.loadMessage = '';
           this.stopStartupTimer();
         }
@@ -591,6 +606,13 @@ struct Player {
         // value = 缓冲区里可播放的时长（ms），增长速率 × 码率 ≈ 下载速度
         this.cachedMs = value;
       }
+    });
+    p.on('speedDone', (mode: number) => {
+      if (this.disposed || generation !== this.playerGeneration) { return; }
+      const index = this.speeds.findIndex((speed: media.PlaybackSpeed) => speed === mode);
+      if (index < 0) { return; }
+      this.effectiveSpeed = this.speedRates[index];
+      this.updateBackgroundSession(this.playing);
     });
     p.on('bitrateDone', (bitrate: number) => {
       if (this.disposed) { return; }
@@ -733,7 +755,7 @@ struct Player {
       hilog.warn(0, 'ShiguangCinema', 'source switch search failed');
     }
     if (!this.disposed && generation === this.playerGeneration) {
-      this.finishHealFail('其他片源没有找到可播放的当前集', manual);
+      this.finishHealFail('其他片源找不到可确认的同一集', manual);
     }
   }
 
@@ -747,11 +769,21 @@ struct Player {
       if (src === null || !src.enabled) { continue; }
       this.triedSourceUrls.add(item.sourceUrl);
       let detail: Detail;
-      try { detail = await api.detail(item.vodId, src); } catch (e) { continue; }
+      try {
+        if (this.session.directCms.shouldTryDirect(src)) {
+          try { detail = await this.session.directCms.detail(src, item.vodId); }
+          catch (e) { detail = await api.detail(item.vodId, src); }
+        } else {
+          detail = await api.detail(item.vodId, src);
+        }
+      } catch (e) { continue; }
       if (this.disposed || generation !== this.playerGeneration) { return false; }
-      const episode = detail.episodes[this.episodeIndex];
-      if (episode === undefined || episode.trim() === '') { continue; }
+      const labels = detail.episodeLabels ?? [];
+      const index = matchEpisodeIndex(this.episodeIndex, this.episodes, this.episodeLabels, detail.episodes, labels);
+      if (index < 0 || detail.episodes[index].trim() === '') { continue; }
+      this.episodeIndex = index;
       this.episodes = detail.episodes;
+      this.episodeLabels = labels;
       this.episodeSource.setItems(this.episodes);
       this.sourceUrl = item.sourceUrl;
       this.vodId = item.vodId;
@@ -928,11 +960,13 @@ struct Player {
   private async updateBackgroundSession(isPlaying: boolean): Promise<void> {
     const session = this.backgroundSession;
     if (session === null) { return; }
+    const update = ++this.backgroundUpdate;
     try {
       await session.setAVMetadata({ assetId: `${this.vodId}:${this.episodeIndex}`, title: this.title,
-        artist: `第 ${this.episodeIndex + 1} 集`, duration: this.durMs });
+        artist: this.episodeTitle(this.episodeIndex), duration: this.durMs });
+      if (update !== this.backgroundUpdate || session !== this.backgroundSession) { return; }
       await session.setAVPlaybackState({ state: isPlaying ? avSession.PlaybackState.PLAYBACK_STATE_PLAY :
-        avSession.PlaybackState.PLAYBACK_STATE_PAUSE, speed: 1, duration: this.durMs,
+        avSession.PlaybackState.PLAYBACK_STATE_PAUSE, speed: this.effectiveSpeed, duration: this.durMs,
         position: { elapsedTime: this.curMs, updateTime: Date.now() } });
     } catch (e) {
       hilog.warn(0, 'ShiguangCinema', 'background session update failed: %{public}s', (e as Error).message);
@@ -955,13 +989,15 @@ struct Player {
     }
   }
 
-  private switchEpisode(delta: number): void {
+  private switchEpisode(delta: number, finished: boolean = false): void {
     const next = this.episodeIndex + delta;
     if (next < 0 || next >= this.episodes.length || this.switching) {
       return;
     }
-    this.saveProgress(true);
+    if (!finished) { this.saveProgress(true); }
     this.episodeIndex = next;
+    this.saveNextOnStart = finished && !this.isLive && this.rememberProgress;
+    if (this.saveNextOnStart) { this.writeProgress(0, 0, true); }
     this.usePlainUrl = true;
     this.alternateTried = false;
     this.sameUrlRetried = false;
@@ -979,6 +1015,7 @@ struct Player {
     if (index === this.episodeIndex || this.switching) { this.showEpisodes = false; return; }
     this.saveProgress(true);
     this.episodeIndex = index;
+    this.saveNextOnStart = false;
     this.usePlainUrl = true;
     this.alternateTried = false;
     this.sameUrlRetried = false;
@@ -1068,20 +1105,32 @@ struct Player {
     }, 3000);
   }
 
+  private saveStartedEpisode(): void {
+    if (!this.saveNextOnStart || !this.playing || this.switching || this.durMs <= 0) { return; }
+    this.saveNextOnStart = false;
+    this.saveProgress(false);
+  }
+
   private saveProgress(final: boolean): void {
-    if (this.isLive || !this.rememberProgress) {
-      return;
-    }
     const p = this.player;
-    if (this.prefs === null || p === null || this.durMs <= 0 || this.recoverySeekPending) {
-      return;
-    }
+    if (p === null || this.durMs <= 0 || this.recoverySeekPending || this.introSeekPending || this.saveNextOnStart) { return; }
+    this.writeProgress(final ? p.currentTime : this.curMs, this.durMs, final);
+  }
+
+  private episodeTitle(index: number): string {
+    const label = (this.episodeLabels[index] ?? '').trim();
+    return label !== '' ? label : `第 ${index + 1} 集`;
+  }
+
+  private writeProgress(position: number, duration: number, final: boolean): void {
+    if (this.isLive || !this.rememberProgress || this.prefs === null) { return; }
     const entry: WatchEntry = entryFromStatus(
       this.session.serverUrl, this.sourceUrl, this.vodId,
       this.title, this.cover,
       this.episodeIndex, this.episodes.length,
-      final ? p.currentTime : this.curMs, this.durMs
+      position, duration
     );
+    entry.episodeLabel = this.episodeLabels[this.episodeIndex] ?? '';
     this.prefs.saveWatch(entry).catch(() => {
       if (final) { promptAction.showToast({ message: '观看进度保存失败，请检查设备存储' }); }
     });
@@ -1142,7 +1191,7 @@ struct Player {
       return;
     }
     if (this.episodeIndex < this.episodes.length - 1) {
-      this.switchEpisode(1);
+      this.switchEpisode(1, true);
       this.notify('已标记片尾，正在播放下一集');
     } else {
       this.seekTo(this.durMs - 300);
@@ -1176,7 +1225,7 @@ struct Player {
     if (this.autoOutro && this.outroMarkedEpisode !== this.episodeIndex &&
       this.episodeIndex < this.episodes.length - 1) {
       const start = this.effectiveOutroStart();
-      if (start > 0 && time >= start) { this.switchEpisode(1); }
+      if (start > 0 && time >= start) { this.switchEpisode(1, true); }
     }
   }
 
@@ -1634,7 +1683,7 @@ struct Player {
               .onClick(() => { this.leaveToHome(); })
             Text(this.isLive
               ? `${this.title} · 直播`
-              : `${this.title} · 第${this.episodeIndex + 1}/${this.episodes.length}集`)
+              : `${this.title} · ${this.episodeTitle(this.episodeIndex)}`)
               .fontSize(14).fontColor('#FFFFFF')
               .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
               .layoutWeight(1)
@@ -1716,7 +1765,7 @@ struct Player {
           List({ space: 5 }) {
             LazyForEach(this.episodeSource, (_url: string, index: number) => {
               ListItem() {
-                Text(this.isLive ? `频道 ${index + 1}` : `第 ${index + 1} 集`)
+                Text(this.isLive ? `频道 ${index + 1}` : this.episodeTitle(index))
                   .width('100%').padding(12).borderRadius(8)
                   .fontColor(index === this.episodeIndex ? '#FFFFFF' : '#DDDDDD')
                   .backgroundColor(index === this.episodeIndex ? '#0F766E' : '#33333A')

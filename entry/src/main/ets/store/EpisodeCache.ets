@@ -24,6 +24,7 @@ import { Context } from '@kit.AbilityKit';
 export interface EpisodeRecord {
   /** 每集播放地址 */
   urls: string[];
+  labels?: string[];
   /** 写入时间 */
   ts: number;
   /** 首集地址：整季换版本时用来识别 */
@@ -122,6 +123,8 @@ export class EpisodeCache {
           }
           const record: EpisodeRecord = {
             urls: urls,
+            labels: Array.isArray(o['labels']) ? (o['labels'] as Object[]).map((value: Object) =>
+              typeof value === 'string' ? value as string : '') : [],
             ts: typeof o['ts'] === 'number' ? o['ts'] as number : 0,
             first: typeof o['first'] === 'string' ? o['first'] as string : urls[0],
             last: typeof o['last'] === 'string' ? o['last'] as string : urls[urls.length - 1]
@@ -140,19 +143,22 @@ export class EpisodeCache {
   /** 命中返回选集地址；过期或对不上返回 null */
   static get(context: Context, server: string, sourceUrl: string, vodId: string,
     currentUrl: string = ''): string[] | null {
-    if (vodId === '') {
-      return null;
-    }
+    return EpisodeCache.getRecord(context, server, sourceUrl, vodId, currentUrl)?.urls.slice() ?? null;
+  }
+
+  static getRecord(context: Context, server: string, sourceUrl: string, vodId: string,
+    currentUrl: string = ''): EpisodeRecord | null {
+    if (vodId === '') { return null; }
     const records = EpisodeCache.ensure(context);
     const record = records.get(episodeCacheKey(server, sourceUrl, vodId));
     if (!episodeRecordUsable(record, currentUrl, Date.now())) {
       return null;
     }
-    return (record as EpisodeRecord).urls.slice();
+    return record as EpisodeRecord;
   }
 
   /** 写入缓存；只有一集的不写（多半是详情接口只回了半截） */
-  static put(context: Context, server: string, sourceUrl: string, vodId: string, urls: string[]): void {
+  static put(context: Context, server: string, sourceUrl: string, vodId: string, urls: string[], labels: string[] = []): void {
     if (vodId === '') { return; }
     const records = EpisodeCache.ensure(context);
     if (urls.length <= 1) {
@@ -161,6 +167,7 @@ export class EpisodeCache {
     }
     const record: EpisodeRecord = {
       urls: urls.slice(0),
+      labels: labels.slice(0),
       ts: Date.now(),
       first: urls[0],
       last: urls[urls.length - 1]
@@ -201,6 +208,7 @@ export class EpisodeCache {
     records.forEach((record: EpisodeRecord, key: string) => {
       root[key] = {
         'urls': record.urls,
+        'labels': record.labels ?? [],
         'ts': record.ts,
         'first': record.first,
         'last': record.last

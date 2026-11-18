@@ -93,12 +93,21 @@ test('history writes serialize completed episode before a new episode', async ()
     put: (k, v) => new Promise(resolve => { writes.push(JSON.parse(v)); release.push(() => { values[k] = v; resolve(); }); }),
     flush: async () => {} };
   const entry = (episodeIndex, positionMs) => ({ key: 'k', serverUrl: 's', sourceUrl: 'x', vodId: 'v', title: 't', cover: '', episodeIndex, episodeCount: 3, positionMs, durationMs: 100, updatedAt: episodeIndex });
-  const first = p.saveWatch(entry(0, 100));
+  const first = p.saveWatch({ ...entry(0, 100), cover: 'old.jpg' });
   const second = p.saveWatch(entry(1, 5));
   await tick(); assert.equal(writes.length, 1); assert.equal(writes[0].list[0].episodeIndex, 0);
   release.shift()(); await tick(); assert.equal(writes.length, 2); assert.equal(writes[1].list[0].episodeIndex, 1);
   release.shift()(); await Promise.all([first, second]);
-  assert.equal((await p.getHistory())[0].episodeIndex, 1);
+  assert.equal((await p.getHistory())[0].cover, 'old.jpg');
+  const repair = p.updateWatchCover('k', 'old.jpg', 'new.jpg');
+  await tick();
+  assert.equal(writes[2].list[0].cover, 'new.jpg');
+  assert.equal(writes[2].list[0].episodeIndex, 1);
+  assert.equal(writes[2].list[0].positionMs, 5);
+  release.shift()();
+  await repair;
+  await p.updateWatchCover('k', 'old.jpg', 'stale.jpg');
+  assert.equal((await p.getHistory())[0].cover, 'new.jpg');
 });
 
 test('search cache omits disabled sources and can discard stale empty results', () => {
@@ -129,20 +138,21 @@ test('exhausted child quota blocks resume before invoking the player', () => {
 test('recent viewing resumes the exact episode and saved position from cache', async () => {
   const source = fs.readFileSync('entry/src/main/ets/common/ResumePlayback.ets', 'utf8');
   let networkCalls = 0;
-  const episodeCache = {get: () => ['first', 'second'], put: () => {}};
+  const episodeCache = {getRecord: () => ({urls: ['first', 'second'], labels: ['第1集', '第2集']}), put: () => {}};
   const { resumePlaybackParams } = load(source, name => name.includes('EpisodeCache') ? { EpisodeCache: episodeCache } : {});
   const session = {serverUrl:'https://server', sources: [], api:{detail: async () => {networkCalls++;}}, directCms: {}};
   const entry = {serverUrl:'https://server', sourceUrl:'https://source', vodId:'1', episodeIndex:1, positionMs:42420, title:'剧', cover:'pic'};
   const p = await resumePlaybackParams({}, entry, session);
   assert.equal(p.index, '1'); assert.equal(p.resumeMs, '42420'); assert.equal(p.forceResume, '1');
-  assert.deepEqual(JSON.parse(p.episodes), ['first', 'second']); assert.equal(networkCalls, 0);
+  assert.deepEqual(JSON.parse(p.episodes), ['first', 'second']);
+  assert.deepEqual(JSON.parse(p.episodeLabels), ['第1集', '第2集']); assert.equal(networkCalls, 0);
   session.serverUrl = 'https://other';
   await assert.rejects(resumePlaybackParams({}, entry, session), /其他服务端/);
 });
 
 test('recent viewing fetches missing episodes and reports unavailable saved episode', async () => {
   const source = fs.readFileSync('entry/src/main/ets/common/ResumePlayback.ets', 'utf8');
-  const episodeCache = {get: () => null, put: () => {}};
+  const episodeCache = {getRecord: () => null, put: () => {}};
   const { resumePlaybackParams } = load(source, name => name.includes('EpisodeCache') ? { EpisodeCache: episodeCache } : {});
   const entry = {serverUrl:'s', sourceUrl:'src', vodId:'1', episodeIndex:1, positionMs:100, title:'剧', cover:''};
   const session = {serverUrl:'s', sources:[{url:'src'}], directCms:{shouldTryDirect: () => true, detail: async () => {throw Error('unavailable');}},
@@ -237,17 +247,20 @@ test('switching source at 10:00 skips missing episodes and seeks before playing'
   const js = ts.transpileModule('export class Harness {' + code + '}', {
     compilerOptions: { module: ts.ModuleKind.CommonJS }
   }).outputText;
-  const context = { exports: {}, media: { SeekMode: { SEEK_CLOSEST: 2 } },
+  const { matchEpisodeIndex } = load(fs.readFileSync('entry/src/main/ets/common/EpisodeMatch.ets', 'utf8'));
+  const context = { exports: {}, matchEpisodeIndex, media: { SeekMode: { SEEK_CLOSEST: 2 } },
     hilog: { info: () => {} }, setTimeout: () => 1 };
   vm.runInNewContext(js, context);
   const player = new context.exports.Harness();
   const calls = [];
   const handlers = new Map();
   Object.assign(player, {
-    title: 'Example', sourceUrl: 'primary', episodeIndex: 2, curMs: 600000, durMs: 1200000,
+    title: 'Example', sourceUrl: 'primary', episodeIndex: 2,
+    episodes: ['a1','a2','a3'], episodeLabels: ['第1集','第2集','第3集'], curMs: 600000, durMs: 1200000,
     recoveryPositionMs: 0, playerGeneration: 1, hudTimer: -1,
-    session: { api: { detail: async (id) => ({
-      episodes: id === 'short' ? ['ep1'] : ['ep1', 'ep2', 'ep3'],
+    session: { directCms: { shouldTryDirect: () => false }, api: { detail: async (id) => ({
+      episodes: id === 'short' ? ['b1','b2','b4'] : ['trailer','b1','b2','b3'],
+      episodeLabels: id === 'short' ? ['第1集','第2集','第4集'] : ['预告','EP01','EP02','EP03'],
       info: { cover: '' }
     }) } },
     findSourceByUrl: () => ({ enabled: true }),
@@ -257,7 +270,9 @@ test('switching source at 10:00 skips missing episodes and seeks before playing'
     canStartForQuota: () => true, playPreparedVideo: () => { calls.push('play'); },
     rejectRecoverySource: () => { calls.push('reject'); },
     canControl: () => true, saveSkipMarks: () => { calls.push('save marks'); },
-    notify: () => {}, fmt: () => ''
+    notify: () => {}, fmt: () => '',
+    speeds: [1, 3, 4, 6, 7, 8], speedRates: [0.75, 1, 1.25, 1.5, 1.75, 2],
+    updateBackgroundSession: () => { calls.push(player.effectiveSpeed); }
   });
   player.openSourceSwitch();
   assert.equal(player.recoveryPositionMs, 600000);
@@ -267,13 +282,20 @@ test('switching source at 10:00 skips missing episodes and seeks before playing'
     { name: 'Example', sourceUrl: 'backup', vodId: 'backup' }
   ], 1);
   assert.equal(player.sourceUrl, 'backup');
-  assert.equal(player.episodeIndex, 2);
+  assert.equal(player.episodeIndex, 3);
+  assert.equal(player.episodes[player.episodeIndex], 'b3');
   assert.equal(player.recoveryPositionMs, 600000);
 
   player.bindPlayerEvents({
     duration: 1200000, setVolume: () => {}, on: (name, callback) => handlers.set(name, callback),
     seek: (time, mode) => { calls.push(['seek', time, mode]); }
   }, 1);
+  handlers.get('speedDone')(6);
+  assert.equal(calls.pop(), 1.5);
+  handlers.get('speedDone')(8);
+  assert.equal(calls.pop(), 2);
+  handlers.get('speedDone')(6);
+  assert.equal(calls.pop(), 1.5);
   handlers.get('stateChange')('prepared');
   assert.deepEqual(calls, ['lookup', ['seek', 600000, 2]]);
   handlers.get('seekDone')(0);
@@ -300,4 +322,120 @@ test('switching source at 10:00 skips missing episodes and seeks before playing'
   player.resumeMs = 180000;
   player.resumeRequestedManually = true;
   assert.equal(player.shouldSkipIntroAtStartup(), false);
+});
+
+test('server search cancellation destroys the request and ignores its late response', async () => {
+  const direct = fs.readFileSync('entry/src/main/ets/api/DirectCms.ets', 'utf8');
+  const { SearchRequests } = load(direct);
+  const src = fs.readFileSync('entry/src/main/ets/api/Api.ets', 'utf8');
+  const method = src.slice(src.indexOf('  private async request('), src.indexOf('  private captureSessionCookie'));
+  let complete;
+  let destroyed = 0;
+  const client = {
+    request: () => new Promise(resolve => { complete = resolve; }),
+    destroy: () => { destroyed++; }
+  };
+  const timeout = src.match(/^const CONNECT_TIMEOUT_MS = .*;$/m)[0];
+  const body = "import { http } from '@kit.NetworkKit'; " + timeout +
+    " export class Harness {" + method.replace('private ', '') + "}";
+  const { Harness } = load(body, () => ({
+    http: { createHttp: () => client, RequestMethod: { POST: 'POST' }, HttpDataType: { STRING: 'string' } }
+  }));
+  const requests = new SearchRequests();
+  const harness = new Harness();
+  harness.cookie = '';
+  harness.baseUrl = 'https://example.test';
+  harness.captureSessionCookie = () => { assert.fail('cancelled response updated cookie'); };
+  const request = harness.request('/api/search', 'POST', '{}', 45000, requests);
+  requests.cancel();
+  complete({ responseCode: 200, result: '{}', header: { 'set-cookie': 'ltv_session=old' } });
+  await assert.rejects(request, /搜索已取消/);
+  assert.equal(destroyed, 1);
+});
+
+test('poster refresh keeps the same title image and tries alternates before refreshing the source', async () => {
+  const src = fs.readFileSync('entry/src/main/ets/components/PosterImage.ets', 'utf8');
+  const method = src.slice(src.indexOf('  private async loadPoster()'), src.indexOf('  aboutToDisappear()'));
+  const code = "import { PosterCache } from './cache'; function getContext() {} " +
+    "export class Harness {" + method.replace('private ', '') + "}";
+  const bitmap = {};
+  const lookups = [];
+  const { Harness } = load(code, () => ({
+    PosterCache: { get: async (_context, url) => {
+      lookups.push(url);
+      return url === 'fresh.jpg' ? bitmap : null;
+    } }
+  }));
+  const poster = Object.assign(new Harness(), {
+    active: true, loadGeneration: 0, url: 'expired.jpg', fallbackLabel: '第一部',
+    displayedLabel: '第一部', displayedUrl: 'old.jpg', bitmap
+  });
+  await poster.loadPoster();
+  assert.equal(poster.bitmap, bitmap);
+
+  const stages = [];
+  const recovered = [];
+  poster.fallbackLabel = '第二部';
+  poster.recoverPoster = async (refresh) => {
+    stages.push(refresh);
+    return [{ url: refresh ? 'fresh.jpg' : 'also-expired.jpg' }];
+  };
+  poster.onPosterRecovered = url => recovered.push(url);
+  const job = poster.loadPoster();
+  assert.equal(poster.bitmap, null);
+  await job;
+  assert.equal(poster.bitmap, bitmap);
+  assert.deepEqual(stages, [false, true]);
+  assert.deepEqual(lookups, ['expired.jpg', 'expired.jpg', 'also-expired.jpg', 'fresh.jpg']);
+  assert.deepEqual(recovered, ['fresh.jpg']);
+});
+
+test('automatic next episode checkpoints history before startup and saves the new position once ready', () => {
+  const src = fs.readFileSync('entry/src/main/ets/pages/Player.ets', 'utf8');
+  const extract = (start, end) => src.slice(src.indexOf(start), src.indexOf(end)).replace('private ', '');
+  const code = extract('  private switchEpisode(', '  private selectEpisode(') +
+    extract('  private saveStartedEpisode()', '  private episodeTitle(');
+  const { Harness } = load('export class Harness {' + code + '}');
+  const writes = [];
+  const player = Object.assign(new Harness(), {
+    episodeIndex: 0, episodes: ['a','b'], curMs: 550000, durMs: 600000, player: {currentTime: 550000},
+    rememberProgress: true, sourceUrl: 'source', playing: true, switching: false,
+    writeProgress(position, duration) { writes.push([this.episodeIndex, position, duration]); },
+    setupPlayer() { this.playing = false; this.switching = true; }
+  });
+  player.switchEpisode(1, true);
+  player.saveProgress(true);
+  assert.deepEqual(writes, [[1, 0, 0]]);
+  Object.assign(player, { curMs: 71000, durMs: 612000, playing: true, switching: false });
+  player.saveStartedEpisode();
+  player.saveStartedEpisode();
+  assert.deepEqual(writes, [[1, 0, 0], [1, 71000, 612000]]);
+});
+
+test('clear history only deletes records after explicit confirmation', async () => {
+  const src = fs.readFileSync('entry/src/main/ets/pages/History.ets', 'utf8');
+  const method = src.slice(src.indexOf('  private async clearAll()'), src.indexOf('  private async resume('));
+  let selected = 0;
+  const code = "import { promptAction, Theme } from './ui'; export class Harness {" + method.replace('private ', '') + "}";
+  const { Harness } = load(code, () => ({
+    Theme: {}, promptAction: { showDialog: async () => ({index: selected}) }
+  }));
+  let deleted = 0;
+  const page = Object.assign(new Harness(), {
+    list: [{}], prefs: { clearHistory: async () => { deleted++; } },
+    setList(value) { this.list = value; }
+  });
+  await page.clearAll();
+  assert.equal(deleted, 0);
+  selected = 1;
+  await page.clearAll();
+  assert.equal(deleted, 1);
+  assert.equal(page.list.length, 0);
+});
+
+test('episode matching rejects ambiguous or unlabelled series and conflicting seasons', () => {
+  const { matchEpisodeIndex } = load(fs.readFileSync('entry/src/main/ets/common/EpisodeMatch.ets', 'utf8'));
+  assert.equal(matchEpisodeIndex(0, ['a','b'], ['第10集'], ['x','y'], ['EP10','第10集']), -1);
+  assert.equal(matchEpisodeIndex(0, ['a','b'], [], ['x','y'], []), -1);
+  assert.equal(matchEpisodeIndex(0, ['a','b'], ['S01E10'], ['x','y'], ['S02E10','S01E11']), -1);
 });

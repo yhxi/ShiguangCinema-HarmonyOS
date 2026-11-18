@@ -7,9 +7,11 @@ import { router, promptAction } from '@kit.ArkUI';
 import { Prefs, WatchEntry } from '../store/Prefs';
 import { Session } from '../store/Session';
 import { Theme } from '../common/Theme';
-import { PosterImage } from '../components/PosterImage';
+import { PosterImage, PosterLocation } from '../components/PosterImage';
 import { EntrySource } from '../components/EntrySource';
 import { resumePlaybackParams } from '../common/ResumePlayback';
+import { Detail, SourceConfig } from '../api/Models';
+import { DETAIL_CACHE, DETAIL_CACHE_TTL_MS, detailCacheGeneration } from '../store/DetailCache';
 
 @Entry
 @Component
@@ -21,6 +23,7 @@ struct History {
   private source: EntrySource = new EntrySource();
   private disposed: boolean = false;
   private resuming: boolean = false;
+  @State confirmingClear: boolean = false;
   private resumeGeneration: number = 0;
 
   aboutToAppear(): void {
@@ -45,15 +48,60 @@ struct History {
     this.source.setItems(l);
   }
 
-  private proxyImg(picUrl: string): string {
+  private posterUrl(raw: string, sourceUrl: string): string {
+    const url = raw.trim();
+    if (url.startsWith('https://') || url.startsWith('http://')) { return url; }
+    if (url.startsWith('//')) { return `https:${url}`; }
+    const origin = sourceUrl.match(/^https?:\/\/[^/?#]+/);
+    if (url.startsWith('/') && origin !== null) { return origin[0] + url; }
+    return '';
+  }
+
+  private posterProxy(url: string, entry: WatchEntry): string {
     const api = this.session.api;
-    if (api === null || picUrl === '') {
-      return '';
+    return api !== null && entry.serverUrl === this.session.serverUrl && url !== '' ? api.imageUrl(url) : '';
+  }
+
+  private async recoverHistoryPoster(entry: WatchEntry, refresh: boolean): Promise<PosterLocation[]> {
+    const api = this.session.api;
+    const candidates: PosterLocation[] = [];
+    if (api === null || entry.serverUrl !== this.session.serverUrl) { return candidates; }
+
+    const previousUrl = this.posterUrl(entry.cover, entry.sourceUrl);
+    const add = (url: string): void => {
+      if (url !== '' && url !== previousUrl && !candidates.some((item: PosterLocation) => item.url === url)) {
+        candidates.push({ url: url, proxy: api.imageUrl(url), cookie: api.currentCookie() });
+      }
+    };
+    const key = `${entry.serverUrl}|${entry.sourceUrl}|${entry.vodId}`;
+    const generation = detailCacheGeneration();
+    if (!refresh) {
+      const cached = DETAIL_CACHE.get(key);
+      if (cached !== undefined && Date.now() - cached.at < DETAIL_CACHE_TTL_MS) {
+        add(this.posterUrl(cached.detail.info.cover, entry.sourceUrl));
+      }
+      for (const item of this.session.cachedSearch(entry.title)) {
+        if (item.name.trim() === entry.title.trim()) { add(this.posterUrl(item.pic, item.sourceUrl)); }
+        if (candidates.length >= 3) { break; }
+      }
+      return candidates;
     }
-    if (picUrl.includes('doubanio.com') || picUrl.includes('douban.com')) {
-      return api.imageUrl(picUrl);
+
+    const source = this.session.sources.find((item: SourceConfig) => item.url === entry.sourceUrl);
+    if (source === undefined || !source.enabled || entry.vodId === '') { return candidates; }
+    let detail: Detail;
+    if (this.session.directCms.shouldTryDirect(source)) {
+      try { detail = await this.session.directCms.detail(source, entry.vodId); }
+      catch (e) { detail = await api.detail(entry.vodId, source); }
+    } else {
+      detail = await api.detail(entry.vodId, source);
     }
-    return picUrl;
+    if (this.disposed || api !== this.session.api || generation !== detailCacheGeneration()) { return []; }
+    add(this.posterUrl(detail.info.cover, entry.sourceUrl));
+    if (candidates.length > 0 && detail.episodes.length > 0) {
+      DETAIL_CACHE.set(key, { detail: detail, at: Date.now() });
+    }
+    return candidates;
   }
 
   private remove(key: string): void {
@@ -65,13 +113,24 @@ struct History {
     });
   }
 
-  private clearAll(): void {
-    if (this.prefs === null) {
-      return;
+  private async clearAll(): Promise<void> {
+    const prefs = this.prefs;
+    if (prefs === null || this.list.length === 0 || this.confirmingClear) { return; }
+    this.confirmingClear = true;
+    try {
+      const result = await promptAction.showDialog({
+        title: '清空观看历史？',
+        message: '清空后将无法从这些记录继续播放。',
+        buttons: [{ text: '取消', color: Theme.INK }, { text: '清空', color: Theme.DANGER }]
+      }).catch(() => null);
+      if (result?.index !== 1 || this.disposed) { return; }
+      await prefs.clearHistory();
+      if (!this.disposed) { this.setList([]); }
+    } catch (e) {
+      if (!this.disposed) { promptAction.showToast({ message: '清空历史失败，请重试' }); }
+    } finally {
+      this.confirmingClear = false;
     }
-    this.prefs.clearHistory().then(() => {
-      this.setList([]);
-    });
   }
 
   private async resume(e: WatchEntry): Promise<void> {
@@ -97,7 +156,7 @@ struct History {
         Blank()
         Button('清空').fontSize(13).height(34).borderRadius(17)
           .backgroundColor(Theme.PANEL).fontColor(Theme.DANGER)
-          .enabled(this.list.length > 0)
+          .enabled(this.list.length > 0 && !this.confirmingClear)
           .onClick(() => { this.clearAll(); })
         Button('‹ 返回').fontSize(13).height(34).borderRadius(17)
           .backgroundColor(Theme.PANEL).fontColor(Theme.INK)
@@ -115,7 +174,13 @@ struct History {
               Row({ space: 12 }) {
                 Stack() {
                   PosterImage({
-                    url: e.cover, proxy: this.proxyImg(e.cover),
+                    url: this.posterUrl(e.cover, e.sourceUrl),
+                    proxy: this.posterProxy(this.posterUrl(e.cover, e.sourceUrl), e),
+                    fallbackLabel: e.title,
+                    recoverPoster: (refresh: boolean) => this.recoverHistoryPoster(e, refresh),
+                    onPosterRecovered: (url: string) => {
+                      this.prefs?.updateWatchCover(e.key, e.cover, url).catch(() => {});
+                    },
                     cookie: this.session.api !== null ? this.session.api.currentCookie() : '',
                     posterHeight: 90
                   })
@@ -123,7 +188,7 @@ struct History {
                 Column({ space: 5 }) {
                   Text(e.title).fontSize(16).fontWeight(FontWeight.Bold).fontColor(Theme.INK)
                     .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-                  Text(`看到第${e.episodeIndex + 1}集 / 共${e.episodeCount}集 · ${this.fmtPos(e.positionMs)}`)
+                  Text(`看到${e.episodeLabel || `第${e.episodeIndex + 1}集`} / 共${e.episodeCount}集 · ${this.fmtPos(e.positionMs)}`)
                     .fontSize(12).fontColor(Theme.SECONDARY)
                   Text(this.fmtTime(e.updatedAt)).fontSize(11).fontColor(Theme.TERTIARY)
                 }
