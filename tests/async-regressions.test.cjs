@@ -190,7 +190,8 @@ test('cancelling a search destroys only its requests and prevents double destruc
 test('skip actions and temporary speed preserve episode and playback state', () => {
   const src = fs.readFileSync('entry/src/main/ets/pages/Player.ets', 'utf8');
   const method = (name, next) => src.slice(src.indexOf(`  private ${name}`), src.indexOf(next, src.indexOf(`  private ${name}`))).replace('private ', '');
-  const code = [method('skipIntro()', '\n  private skipOutro'), method('skipOutro()', '\n  /**'),
+  const code = [method('markOutroStart(', '\n  /**'),
+    method('effectiveOutroStart()', '\n  private applySkipMarks'),
     method('applySkipMarks(', '\n  private saveSkipMarks'),
     method('beginTemporarySpeed()', '\n  private endTemporarySpeed'),
     method('endTemporarySpeed()', '\n  private setSpeed')].join('\n');
@@ -199,17 +200,104 @@ test('skip actions and temporary speed preserve episode and playback state', () 
   vm.runInNewContext(js, context);
   const h = new context.exports.Harness();
   Object.assign(h, { isLive:false, playing:true, switching:false, userDragging:false, durMs:600000,
-    marksLoaded:true, introApplied:false, autoIntro:true, introEndMs:90000, resumeMs:0,
-    autoOutro:true, autoNext:false, outroMarkedEpisode:-1, episodeIndex:0, episodes:['a','b'],
+    marksLoaded:true,
+    autoOutro:false, autoNext:false, outroMarkedEpisode:-1, episodeIndex:0, episodes:['a','b','c'],
     speedIndex:3, speeds:[0.75,1,1.25,1.5,1.75,2], locked:false, temporarySpeed:false,
     hudTimer:-1, gestureMessage:'', canControl:()=>true, notify:()=>{}, fmt:()=>'',
-    seekTo:value=>{h.seek=value}, effectiveOutroStart:()=>550000,
-    switchEpisode:()=>{h.episodeIndex++; h.introApplied=false; h.resumeMs=0},
+    seekTo:value=>{h.seek=value}, saveSkipMarks:()=>{h.savedOutro=h.outroRemainingMs},
+    switchEpisode:()=>{h.episodeIndex++;},
     player:{setSpeed:value=>{h.appliedSpeed=value}} });
-  h.applySkipMarks(1000); assert.equal(h.seek,90000);
-  h.applySkipMarks(550000); assert.equal(h.episodeIndex,1);
-  h.seek=0; h.applySkipMarks(1000); assert.equal(h.seek,90000);
+  h.curMs = 550000;
+  h.markOutroStart(true);
+  assert.equal(h.savedOutro, 50000);
+  assert.equal(h.autoOutro, true);
+  assert.equal(h.episodeIndex, 1);
+  h.durMs = 610000;
+  h.applySkipMarks(559999); assert.equal(h.episodeIndex, 1);
+  h.applySkipMarks(560000); assert.equal(h.episodeIndex, 2);
   h.beginTemporarySpeed(); assert.equal(h.appliedSpeed,2); assert.equal(h.speedIndex,3);
   h.endTemporarySpeed(); assert.equal(h.appliedSpeed,1.5); assert.equal(h.speedIndex,3);
   h.playing=false; h.beginTemporarySpeed(); assert.equal(h.temporarySpeed,false);
+});
+
+test('switching source at 10:00 skips missing episodes and seeks before playing', async () => {
+  const src = fs.readFileSync('entry/src/main/ets/pages/Player.ets', 'utf8');
+  const method = (name, next) => {
+    const start = src.indexOf('  private ' + name);
+    return src.slice(start, src.indexOf(next, start)).replace('private ', '');
+  };
+  const code = [
+    method('openSourceSwitch()', '\n  /**'),
+    method('keepRecoveryPosition()', '\n  private rejectRecoverySource'),
+    method('async trySourceCandidates(', '\n  private findSourceByUrl'),
+    method('markIntroEnd()', '\n  private shouldSkipIntroAtStartup'),
+    method('shouldSkipIntroAtStartup()', '\n  private markOutroStart'),
+    method('bindPlayerEvents(', '\n  private playPreparedVideo')
+  ].join('\n');
+  const js = ts.transpileModule('export class Harness {' + code + '}', {
+    compilerOptions: { module: ts.ModuleKind.CommonJS }
+  }).outputText;
+  const context = { exports: {}, media: { SeekMode: { SEEK_CLOSEST: 2 } },
+    hilog: { info: () => {} }, setTimeout: () => 1 };
+  vm.runInNewContext(js, context);
+  const player = new context.exports.Harness();
+  const calls = [];
+  const handlers = new Map();
+  Object.assign(player, {
+    title: 'Example', sourceUrl: 'primary', episodeIndex: 2, curMs: 600000, durMs: 1200000,
+    recoveryPositionMs: 0, playerGeneration: 1, hudTimer: -1,
+    session: { api: { detail: async (id) => ({
+      episodes: id === 'short' ? ['ep1'] : ['ep1', 'ep2', 'ep3'],
+      info: { cover: '' }
+    }) } },
+    findSourceByUrl: () => ({ enabled: true }),
+    episodeSource: { setItems: () => {} }, setupPlayer: () => {},
+    saveProgress: () => {}, switchToNextSource: () => { calls.push('lookup'); },
+    accountQuota: () => {}, applyScale: () => {}, refreshTracks: () => {},
+    canStartForQuota: () => true, playPreparedVideo: () => { calls.push('play'); },
+    rejectRecoverySource: () => { calls.push('reject'); },
+    canControl: () => true, saveSkipMarks: () => { calls.push('save marks'); },
+    notify: () => {}, fmt: () => ''
+  });
+  player.openSourceSwitch();
+  assert.equal(player.recoveryPositionMs, 600000);
+  assert.deepEqual(calls, ['lookup']);
+  await player.trySourceCandidates([
+    { name: 'Example', sourceUrl: 'short', vodId: 'short' },
+    { name: 'Example', sourceUrl: 'backup', vodId: 'backup' }
+  ], 1);
+  assert.equal(player.sourceUrl, 'backup');
+  assert.equal(player.episodeIndex, 2);
+  assert.equal(player.recoveryPositionMs, 600000);
+
+  player.bindPlayerEvents({
+    duration: 1200000, setVolume: () => {}, on: (name, callback) => handlers.set(name, callback),
+    seek: (time, mode) => { calls.push(['seek', time, mode]); }
+  }, 1);
+  handlers.get('stateChange')('prepared');
+  assert.deepEqual(calls, ['lookup', ['seek', 600000, 2]]);
+  handlers.get('seekDone')(0);
+  assert.equal(calls.at(-1), 'reject');
+  assert.equal(player.recoveryPositionMs, 600000);
+  handlers.get('seekDone')(600000);
+  assert.equal(calls.at(-1), 'play');
+  assert.equal(player.curMs, 600000);
+  assert.equal(player.recoveryPositionMs, 0);
+
+  calls.length = 0;
+  player.curMs = 71300;
+  player.markIntroEnd();
+  assert.deepEqual(calls, ['save marks']);
+  assert.equal(player.introEndMs, 71300);
+  assert.equal(player.autoIntro, true);
+  player.curMs = 0;
+  player.episodeIndex++;
+  handlers.get('stateChange')('prepared');
+  assert.deepEqual(calls, ['save marks', ['seek', 71300, 2]]);
+  handlers.get('seekDone')(71300);
+  assert.equal(player.curMs, 71300);
+  assert.equal(calls.at(-1), 'play');
+  player.resumeMs = 180000;
+  player.resumeRequestedManually = true;
+  assert.equal(player.shouldSkipIntroAtStartup(), false);
 });
