@@ -439,3 +439,48 @@ test('episode matching rejects ambiguous or unlabelled series and conflicting se
   assert.equal(matchEpisodeIndex(0, ['a','b'], [], ['x','y'], []), -1);
   assert.equal(matchEpisodeIndex(0, ['a','b'], ['S01E10'], ['x','y'], ['S02E10','S01E11']), -1);
 });
+
+test('media center enables only available episodes and seeks by the requested interval', () => {
+  const src = fs.readFileSync('entry/src/main/ets/pages/Player.ets', 'utf8');
+  const methods = src.slice(src.indexOf('  private syncBackgroundControls('),
+    src.indexOf('  private refreshBackgroundArtwork(')).replaceAll('private ', '');
+  const code = "import { deviceInfo, media } from './system'; export class Harness {" + methods + "}";
+  const { Harness } = load(code, () => ({ deviceInfo: { sdkApiVersion: 26 }, media: { SeekMode: { SEEK_CLOSEST: 2 } } }));
+  const handlers = new Map();
+  const clicks = [];
+  const seeks = [];
+  let controls;
+  const session = {
+    on(name, handler) { handlers.set(name, handler); },
+    off(name) { handlers.delete(name); },
+    async setMediaCenterControlType(value) { controls = Array.from(value); }
+  };
+  const player = Object.assign(new Harness(), {
+    episodeIndex: 0, episodes: ['a','b','c'], durMs: 120000,
+    backgroundCanGoPrevious: false, backgroundCanGoNext: false,
+    canControl: () => true, switchEpisode: delta => clicks.push(delta),
+    player: { currentTime: 10000, seek: (position, mode) => seeks.push([position, mode]) }
+  });
+  player.syncBackgroundControls(session);
+  assert.equal(handlers.has('playPrevious'), false);
+  handlers.get('playNext')();
+  assert.deepEqual(controls, ['rewind', 'fastForward', 'playNext']);
+
+  player.episodeIndex = 1;
+  player.syncBackgroundControls(session);
+  assert.deepEqual(controls, ['rewind', 'fastForward', 'playPrevious', 'playNext']);
+  handlers.get('playPrevious')();
+  assert.deepEqual(clicks, [1, -1]);
+
+  player.skipFromMediaCenter(1);
+  player.skipFromMediaCenter(-1);
+  player.seekFromMediaCenter(999999);
+  assert.deepEqual(seeks, [[25000, 2], [0, 2], [119700, 2]]);
+
+  player.episodeIndex = 2;
+  player.syncBackgroundControls(session);
+  assert.equal(handlers.has('playNext'), false);
+  player.switching = true;
+  player.skipFromMediaCenter(1);
+  assert.equal(seeks.length, 3);
+});

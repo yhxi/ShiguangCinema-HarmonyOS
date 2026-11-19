@@ -208,6 +208,8 @@ struct SettingsPage {
 
         Text('维护工具').fontSize(16).fontWeight(FontWeight.Bold).fontColor(Theme.INK)
           .width('100%').padding({ top: 22, bottom: 10 })
+        this.card({ icon: '▣', title: '应用图标', subtitle: '六款主题，切换桌面图标',
+          action: () => { router.pushUrl({ url: 'pages/AppIcons' }); } })
         this.card({ icon: '◷', title: '清理缓存', subtitle: '管理本地缓存占用', action: () => { this.clearCache(); } })
         this.card({ icon: '⌕', title: '网络诊断', subtitle: '检测连接和片源响应',
           action: () => { router.pushUrl({ url: 'pages/NetDiag' }); } })

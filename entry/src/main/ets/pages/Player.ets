@@ -9,7 +9,8 @@ import { matchEpisodeIndex } from '../common/EpisodeMatch';
  */
 
 import { media } from '@kit.MediaKit';
-import { BusinessError } from '@kit.BasicServicesKit';
+import { BusinessError, deviceInfo } from '@kit.BasicServicesKit';
+import { image } from '@kit.ImageKit';
 import { http } from '@kit.NetworkKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { router, window, promptAction } from '@kit.ArkUI';
@@ -18,6 +19,7 @@ import { avSession } from '@kit.AVSessionKit';
 import { wantAgent } from '@kit.AbilityKit';
 import { fitVideoFrame } from './VideoLayout';
 import { EpisodeListSource } from './EpisodeListSource';
+import { loadPosterBitmap } from '../components/PosterImage';
 import { Prefs, PlaybackSettings, SkipMarks, WatchEntry, entryFromStatus } from '../store/Prefs';
 import { Session } from '../store/Session';
 import { ChildrenQuota } from '../store/ChildrenQuota';
@@ -152,6 +154,13 @@ struct Player {
   private previousKeepScreenOn: boolean = false;
   private effectiveSpeed: number = 1;
   private backgroundUpdate: number = 0;
+  private backgroundStarting: boolean = false;
+  private backgroundCanGoPrevious: boolean = false;
+  private backgroundCanGoNext: boolean = false;
+  private backgroundArtworkKey: string = '';
+  private backgroundMetadataKey: string = '';
+  private backgroundControlsKey: string = '';
+  private backgroundArtwork: image.PixelMap | null = null;
   private speedRates: number[] = [0.75, 1, 1.25, 1.5, 1.75, 2];
   private speeds: media.PlaybackSpeed[] = [media.PlaybackSpeed.SPEED_FORWARD_0_75_X,
     media.PlaybackSpeed.SPEED_FORWARD_1_00_X, media.PlaybackSpeed.SPEED_FORWARD_1_25_X,
@@ -529,7 +538,13 @@ struct Player {
         this.playPreparedVideo(p, generation);
         return;
       }
-      if (!this.recoverySeekPending) { return; }
+      if (!this.recoverySeekPending) {
+        if (Number.isFinite(position) && position >= 0) {
+          this.curMs = position;
+          this.updateBackgroundSession(this.playing);
+        }
+        return;
+      }
       if (!Number.isFinite(position) || Math.abs(position - this.recoveryPositionMs) > 3000) {
         this.rejectRecoverySource();
         return;
@@ -929,41 +944,126 @@ struct Player {
   }
 
   private async startBackgroundPlayback(): Promise<void> {
-    if (!this.backgroundPlayback || !this.playing || this.isLive) { return; }
+    if (!this.backgroundPlayback || !this.playing || this.isLive || this.disposed || this.backgroundStarting) { return; }
+    this.backgroundStarting = true;
     try {
       if (this.backgroundSession === null) {
         const session = await avSession.createAVSession(getContext(this), 'ShiguangCinema', 'video');
+        if (this.disposed) { await session.destroy(); return; }
+        this.backgroundSession = session;
         session.on('play', () => {
-          if (this.canStartForQuota()) { this.player?.play().catch(() => {}); }
+          if (this.canStartForQuota() && !this.switching) { this.player?.play().catch(() => {}); }
         });
         session.on('pause', () => { this.player?.pause().catch(() => {}); });
         session.on('stop', () => { this.player?.pause().catch(() => {}); });
-        this.backgroundSession = session;
+        session.on('seek', (time: number) => { this.seekFromMediaCenter(time); });
+        session.on('fastForward', (time?: number) => { this.skipFromMediaCenter(1, time); });
+        session.on('rewind', (time?: number) => { this.skipFromMediaCenter(-1, time); });
+        this.syncBackgroundControls(session, false);
         await session.activate();
       }
+      if (this.disposed || !this.playing) { return; }
       await this.updateBackgroundSession(true);
-      if (!this.backgroundTaskActive) {
+      if (!this.backgroundTaskActive && !this.disposed && this.playing) {
         const agent = await wantAgent.getWantAgent({
           wants: [{ bundleName: 'com.lshai.shiguangcinema', abilityName: 'EntryAbility' }],
           operationType: wantAgent.OperationType.START_ABILITY,
           requestCode: 1
         });
+        if (this.disposed || !this.playing) { return; }
         await backgroundTaskManager.startBackgroundRunning(getContext(this),
           backgroundTaskManager.BackgroundMode.AUDIO_PLAYBACK, agent);
         this.backgroundTaskActive = true;
+        if (this.disposed || !this.playing) { await this.stopBackgroundTask(); }
       }
     } catch (e) {
       hilog.warn(0, 'ShiguangCinema', 'background playback start failed: %{public}s', (e as Error).message);
+    } finally {
+      this.backgroundStarting = false;
     }
+  }
+
+  private syncBackgroundControls(session: avSession.AVSession, configure: boolean = true): void {
+    const previous = this.episodeIndex > 0;
+    const next = this.episodeIndex + 1 < this.episodes.length;
+    if (previous !== this.backgroundCanGoPrevious) {
+      if (previous) { session.on('playPrevious', () => { this.switchEpisode(-1); }); }
+      else { session.off('playPrevious'); }
+      this.backgroundCanGoPrevious = previous;
+    }
+    if (next !== this.backgroundCanGoNext) {
+      if (next) { session.on('playNext', () => { this.switchEpisode(1); }); }
+      else { session.off('playNext'); }
+      this.backgroundCanGoNext = next;
+    }
+    const key = `${previous}:${next}`;
+    if (configure && key !== this.backgroundControlsKey &&
+      deviceInfo.sdkApiVersion >= 26 && typeof session.setMediaCenterControlType === 'function') {
+      this.backgroundControlsKey = key;
+      const controls: avSession.AVMediaCenterControlType[] = ['rewind', 'fastForward'];
+      if (previous) { controls.push('playPrevious'); }
+      if (next) { controls.push('playNext'); }
+      session.setMediaCenterControlType(controls).catch(() => {
+        if (this.backgroundControlsKey === key) { this.backgroundControlsKey = ''; }
+      });
+    }
+  }
+
+  private skipFromMediaCenter(direction: number, time?: number): void {
+    const player = this.player;
+    if (player === null) { return; }
+    const offset = time !== undefined && Number.isFinite(time) && time > 0 ? time : 15000;
+    this.seekFromMediaCenter(player.currentTime + direction * offset);
+  }
+
+  private seekFromMediaCenter(position: number): void {
+    const player = this.player;
+    if (this.disposed || this.switching || !this.canControl() || player === null ||
+      this.durMs <= 0 || !Number.isFinite(position)) { return; }
+    const target = Math.max(0, Math.min(position, Math.max(0, this.durMs - 300)));
+    try { player.seek(target, media.SeekMode.SEEK_CLOSEST); } catch (e) { /* Some streams cannot seek. */ }
+  }
+
+  private refreshBackgroundArtwork(session: avSession.AVSession): void {
+    const raw = this.cover.trim();
+    const origin = this.sourceUrl.match(/^https?:\/\/[^/?#]+/);
+    const url = raw.startsWith('//') ? `https:${raw}` :
+      (raw.startsWith('/') && origin !== null ? origin[0] + raw : raw);
+    if (url === this.backgroundArtworkKey) { return; }
+    this.backgroundArtworkKey = url;
+    this.backgroundArtwork = null;
+    if (!/^https?:\/\//i.test(url)) { return; }
+    const api = this.session.api;
+    loadPosterBitmap(getContext(this), url, api?.imageUrl(url) ?? '', api?.currentCookie() ?? '')
+      .then((bitmap: image.PixelMap | null) => {
+        if (bitmap === null || this.disposed || this.backgroundSession !== session || this.backgroundArtworkKey !== url) {
+          return;
+        }
+        this.backgroundArtwork = bitmap;
+        this.updateBackgroundSession(this.playing);
+      }).catch(() => {});
   }
 
   private async updateBackgroundSession(isPlaying: boolean): Promise<void> {
     const session = this.backgroundSession;
-    if (session === null) { return; }
+    if (session === null || this.disposed) { return; }
     const update = ++this.backgroundUpdate;
     try {
-      await session.setAVMetadata({ assetId: `${this.vodId}:${this.episodeIndex}`, title: this.title,
-        artist: this.episodeTitle(this.episodeIndex), duration: this.durMs });
+      this.refreshBackgroundArtwork(session);
+      this.syncBackgroundControls(session);
+      const metadata: avSession.AVMetadata = {
+        assetId: `${this.vodId}:${this.episodeIndex}`,
+        title: this.title, artist: this.episodeTitle(this.episodeIndex),
+        duration: this.durMs, skipIntervals: avSession.SkipIntervals.SECONDS_15
+      };
+      const metadataKey = `${this.sourceUrl}|${metadata.assetId}|${this.durMs}|${this.backgroundArtworkKey}|${this.backgroundArtwork !== null}`;
+      if (metadataKey !== this.backgroundMetadataKey) {
+        if (this.backgroundArtwork !== null) { metadata.mediaImage = this.backgroundArtwork; }
+        await session.setAVMetadata(metadata);
+        if (update === this.backgroundUpdate && session === this.backgroundSession) {
+          this.backgroundMetadataKey = metadataKey;
+        }
+      }
       if (update !== this.backgroundUpdate || session !== this.backgroundSession) { return; }
       await session.setAVPlaybackState({ state: isPlaying ? avSession.PlaybackState.PLAYBACK_STATE_PLAY :
         avSession.PlaybackState.PLAYBACK_STATE_PAUSE, speed: this.effectiveSpeed, duration: this.durMs,
@@ -984,6 +1084,12 @@ struct Player {
     await this.stopBackgroundTask();
     const session = this.backgroundSession;
     this.backgroundSession = null;
+    this.backgroundCanGoPrevious = false;
+    this.backgroundCanGoNext = false;
+    this.backgroundArtworkKey = '';
+    this.backgroundMetadataKey = '';
+    this.backgroundControlsKey = '';
+    this.backgroundArtwork = null;
     if (session !== null) {
       try { await session.destroy(); } catch (e) { /* The system may already have closed this session. */ }
     }

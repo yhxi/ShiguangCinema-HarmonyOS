@@ -285,6 +285,10 @@ export interface PosterLocation {
   cookie: string;
 }
 
+export function loadPosterBitmap(context: Context, url: string, proxy: string, cookie: string): Promise<image.PixelMap | null> {
+  return PosterCache.get(context, url, proxy, cookie);
+}
+
 export function clearPosterCache(): void { PosterCache.clear(); }
 export function retryPosterCache(): void { PosterCache.clearFailures(); }
 
