@@ -440,12 +440,13 @@ test('episode matching rejects ambiguous or unlabelled series and conflicting se
   assert.equal(matchEpisodeIndex(0, ['a','b'], ['S01E10'], ['x','y'], ['S02E10','S01E11']), -1);
 });
 
-test('media center enables only available episodes and seeks by the requested interval', () => {
+test('media center enables only available episodes and skips ten seconds through the player gesture seek', () => {
   const src = fs.readFileSync('entry/src/main/ets/pages/Player.ets', 'utf8');
   const methods = src.slice(src.indexOf('  private syncBackgroundControls('),
-    src.indexOf('  private refreshBackgroundArtwork(')).replaceAll('private ', '');
-  const code = "import { deviceInfo, media } from './system'; export class Harness {" + methods + "}";
-  const { Harness } = load(code, () => ({ deviceInfo: { sdkApiVersion: 26 }, media: { SeekMode: { SEEK_CLOSEST: 2 } } }));
+    src.indexOf('  private refreshBackgroundArtwork(')) +
+    src.slice(src.indexOf('  private seekTo('), src.indexOf('  private markIntroEnd('));
+  const code = "import { deviceInfo, media } from './system'; export class Harness {" + methods.replaceAll('private ', '') + "}";
+  const { Harness } = load(code, () => ({ deviceInfo: { sdkApiVersion: 26 }, media: { SeekMode: { SEEK_PREV_SYNC: 1 } } }));
   const handlers = new Map();
   const clicks = [];
   const seeks = [];
@@ -475,12 +476,15 @@ test('media center enables only available episodes and seeks by the requested in
   player.skipFromMediaCenter(1);
   player.skipFromMediaCenter(-1);
   player.seekFromMediaCenter(999999);
-  assert.deepEqual(seeks, [[25000, 2], [0, 2], [119700, 2]]);
+  assert.deepEqual(seeks, [[20000, 1], [0, 1], [119700, 1]]);
+  player.player.currentTime = 45000;
+  player.skipFromMediaCenter(-1);
+  assert.deepEqual(seeks.at(-1), [35000, 1]);
 
   player.episodeIndex = 2;
   player.syncBackgroundControls(session);
   assert.equal(handlers.has('playNext'), false);
   player.switching = true;
   player.skipFromMediaCenter(1);
-  assert.equal(seeks.length, 3);
+  assert.equal(seeks.length, 4);
 });

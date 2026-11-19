@@ -957,8 +957,8 @@ struct Player {
         session.on('pause', () => { this.player?.pause().catch(() => {}); });
         session.on('stop', () => { this.player?.pause().catch(() => {}); });
         session.on('seek', (time: number) => { this.seekFromMediaCenter(time); });
-        session.on('fastForward', (time?: number) => { this.skipFromMediaCenter(1, time); });
-        session.on('rewind', (time?: number) => { this.skipFromMediaCenter(-1, time); });
+        session.on('fastForward', () => { this.skipFromMediaCenter(1); });
+        session.on('rewind', () => { this.skipFromMediaCenter(-1); });
         this.syncBackgroundControls(session, false);
         await session.activate();
       }
@@ -1009,19 +1009,16 @@ struct Player {
     }
   }
 
-  private skipFromMediaCenter(direction: number, time?: number): void {
+  private skipFromMediaCenter(direction: number): void {
     const player = this.player;
     if (player === null) { return; }
-    const offset = time !== undefined && Number.isFinite(time) && time > 0 ? time : 15000;
-    this.seekFromMediaCenter(player.currentTime + direction * offset);
+    const position = Number.isFinite(player.currentTime) && player.currentTime >= 0 ? player.currentTime : this.curMs;
+    this.seekFromMediaCenter(position + direction * 10000);
   }
 
   private seekFromMediaCenter(position: number): void {
-    const player = this.player;
-    if (this.disposed || this.switching || !this.canControl() || player === null ||
-      this.durMs <= 0 || !Number.isFinite(position)) { return; }
-    const target = Math.max(0, Math.min(position, Math.max(0, this.durMs - 300)));
-    try { player.seek(target, media.SeekMode.SEEK_CLOSEST); } catch (e) { /* Some streams cannot seek. */ }
+    if (this.disposed || this.switching || !Number.isFinite(position)) { return; }
+    this.seekTo(position);
   }
 
   private refreshBackgroundArtwork(session: avSession.AVSession): void {
@@ -1054,8 +1051,12 @@ struct Player {
       const metadata: avSession.AVMetadata = {
         assetId: `${this.vodId}:${this.episodeIndex}`,
         title: this.title, artist: this.episodeTitle(this.episodeIndex),
-        duration: this.durMs, skipIntervals: avSession.SkipIntervals.SECONDS_15
+        duration: this.durMs, skipIntervals: avSession.SkipIntervals.SECONDS_10
       };
+      if (deviceInfo.sdkApiVersion >= 26) {
+        metadata.rewindSkipIntervals = avSession.SkipIntervals.SECONDS_10;
+        metadata.fastForwardSkipIntervals = avSession.SkipIntervals.SECONDS_10;
+      }
       const metadataKey = `${this.sourceUrl}|${metadata.assetId}|${this.durMs}|${this.backgroundArtworkKey}|${this.backgroundArtwork !== null}`;
       if (metadataKey !== this.backgroundMetadataKey) {
         if (this.backgroundArtwork !== null) { metadata.mediaImage = this.backgroundArtwork; }
