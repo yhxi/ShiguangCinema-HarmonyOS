@@ -83,6 +83,13 @@ export interface UpdateState {
   checkedAt: number;
 }
 
+const VIEWING_BACKUP_FORMAT = 'shiguang-harmonyos-viewing-backup';
+
+interface BackupMark {
+  title: string;
+  marks: SkipMarks;
+}
+
 export class Prefs {
   private static instance: Prefs | null = null;
   private store: preferences.Preferences | null = null;
@@ -485,6 +492,139 @@ export class Prefs {
     const root: Record<string, Object> = { 'list': arr as Object };
     await (this.store as preferences.Preferences).put(key, JSON.stringify(root));
     await (this.store as preferences.Preferences).flush();
+  }
+
+  private backupAddressContainsCredentials(url: string): boolean {
+    return /^(?:https?:)?\/\/[^/?#]*@/i.test(url) ||
+      /[?&](?:password|passwd|pwd|token|access_token|auth|authorization|cookie|session|key)=/i.test(url);
+  }
+
+  async exportViewingBackup(server: string, sources: SourceConfig[]): Promise<string> {
+    if (this.backupAddressContainsCredentials(server)) { throw new Error('服务端地址含登录信息，无法导出'); }
+    const canExport = (entry: WatchEntry): boolean => entry.serverUrl === server &&
+      !this.backupAddressContainsCredentials(entry.sourceUrl);
+    const snapshot = (entry: WatchEntry): Record<string, Object> => {
+      const row = entryToObj(entry);
+      if (this.backupAddressContainsCredentials(entry.cover)) { row['cover'] = ''; }
+      return row;
+    };
+    const history = (await this.getHistory()).filter(canExport).map(snapshot);
+    const favorites = (await this.getFavorites()).filter(canExport).map(snapshot);
+    const exportedSources = sources
+      .filter((source: SourceConfig) => !this.backupAddressContainsCredentials(source.url))
+      .map((source: SourceConfig): SourceConfig => ({
+        name: source.name, url: source.url, detail: this.backupAddressContainsCredentials(source.detail) ? '' : source.detail,
+        isAdult: source.isAdult, enabled: source.enabled
+      }));
+    const raw = await (this.store as preferences.Preferences).getAll() as Record<string, Object>;
+    const marks: BackupMark[] = [];
+    for (const key of Object.keys(raw)) {
+      if (key.startsWith('skip:') && key.length > 5) {
+        marks.push({ title: key.substring(5), marks: await this.getSkipMarks(key.substring(5)) });
+      }
+    }
+    return JSON.stringify({
+      format: VIEWING_BACKUP_FORMAT, version: 1, server: server,
+      history: history, favorites: favorites, sources: exportedSources, marks: marks
+    });
+  }
+
+  async restoreViewingBackup(text: string, server: string, currentSources: SourceConfig[]): Promise<SourceConfig[]> {
+    const root = asObj(JSON.parse(text) as Object);
+    if (root === null || root['format'] !== VIEWING_BACKUP_FORMAT || root['version'] !== 1) {
+      throw new Error('文件不是时光影院鸿蒙版的观看备份');
+    }
+    if (root['server'] !== server) { throw new Error('请先连接备份所对应的服务端'); }
+    const history = this.parseBackupEntries(root['history'], server);
+    const favorites = this.parseBackupEntries(root['favorites'], server);
+    const sourceRows = asArr(root['sources']);
+    const markRows = asArr(root['marks']);
+    if (sourceRows === null || markRows === null || sourceRows.length > 1000 || markRows.length > 4000) {
+      throw new Error('备份项目缺失或超出容量');
+    }
+    const sources = new Map<string, SourceConfig>();
+    for (const current of currentSources) { sources.set(current.url, current); }
+    for (const value of sourceRows) {
+      const row = asObj(value);
+      if (row === null || !/^https?:\/\//i.test(s(row['url'])) ||
+        typeof row['enabled'] !== 'boolean' || typeof row['isAdult'] !== 'boolean') {
+        throw new Error('备份片源格式错误');
+      }
+      const url = s(row['url']);
+      sources.set(url, { name: s(row['name'], url), url: url, detail: s(row['detail']),
+        enabled: b(row['enabled']), isAdult: b(row['isAdult']) });
+    }
+    const marks: BackupMark[] = [];
+    for (const value of markRows) {
+      const row = asObj(value);
+      const mark = row === null ? null : asObj(row['marks']);
+      const title = row === null ? '' : s(row['title']).trim().toLowerCase();
+      if (title === '' || mark === null || typeof mark['autoIntro'] !== 'boolean' ||
+        typeof mark['autoOutro'] !== 'boolean') { throw new Error('备份跳过标记格式错误'); }
+      const positions = ['introEndMs', 'outroStartMs', 'outroRemainingMs', 'outroReferenceMs'];
+      for (const name of positions) {
+        if (typeof mark[name] !== 'number' || !Number.isFinite(n(mark[name])) || n(mark[name]) < 0) {
+          throw new Error('备份跳过时间无效');
+        }
+      }
+      marks.push({ title: title, marks: { introEndMs: n(mark['introEndMs']), outroStartMs: n(mark['outroStartMs']),
+        autoIntro: b(mark['autoIntro']), autoOutro: b(mark['autoOutro']),
+        outroRemainingMs: n(mark['outroRemainingMs']), outroReferenceMs: n(mark['outroReferenceMs']) } });
+    }
+    const mergedSources = Array.from(sources.values());
+    await this.enqueueHistory(async () => {
+      if (this.historyCache === null) { await this.loadHistoryFromDisk(); }
+      const mergedHistory = this.mergeBackupEntries(this.historyCache as WatchEntry[], history).slice(0, 100);
+      await this.putEntryList(KEY_HISTORY, mergedHistory);
+      this.historyCache = mergedHistory;
+      const mergedFavorites = this.mergeBackupEntries(await this.getFavorites(), favorites);
+      await this.putEntryList(KEY_FAVORITES, mergedFavorites);
+      await this.setSources(server, mergedSources);
+      const store = this.store as preferences.Preferences;
+      for (const item of marks) {
+        const key = 'skip:' + item.title;
+        if (this.getRaw(key, '') === '') { await store.put(key, JSON.stringify(item.marks)); }
+      }
+      await store.flush();
+    });
+    return mergedSources;
+  }
+
+  private parseBackupEntries(value: Object | undefined, server: string): WatchEntry[] {
+    const rows = asArr(value);
+    if (rows === null || rows.length > 4000) { throw new Error('备份记录格式错误'); }
+    const out: WatchEntry[] = [];
+    for (const value of rows) {
+      const row = asObj(value);
+      if (row === null || row['serverUrl'] !== server || s(row['vodId']) === '' || s(row['title']) === '' ||
+        !/^https?:\/\//i.test(s(row['sourceUrl']))) { throw new Error('备份观看记录格式错误'); }
+      const numbers = ['episodeIndex', 'episodeCount', 'positionMs', 'durationMs', 'updatedAt'];
+      for (const name of numbers) {
+        if (typeof row[name] !== 'number' || !Number.isFinite(n(row[name])) || n(row[name]) < 0) {
+          throw new Error('备份观看进度无效');
+        }
+      }
+      if (!Number.isSafeInteger(n(row['episodeIndex'])) || !Number.isSafeInteger(n(row['episodeCount']))) {
+        throw new Error('备份集数无效');
+      }
+      const source = s(row['sourceUrl']);
+      const vodId = s(row['vodId']);
+      out.push({ key: watchKey(server, source, vodId), serverUrl: server, sourceUrl: source, vodId: vodId,
+        title: s(row['title']), cover: s(row['cover']), episodeIndex: n(row['episodeIndex']),
+        episodeLabel: s(row['episodeLabel']), episodeCount: n(row['episodeCount']), positionMs: n(row['positionMs']),
+        durationMs: n(row['durationMs']), updatedAt: n(row['updatedAt']) });
+    }
+    return out;
+  }
+
+  private mergeBackupEntries(current: WatchEntry[], imported: WatchEntry[]): WatchEntry[] {
+    const entries = new Map<string, WatchEntry>();
+    for (const entry of current) { entries.set(entry.key, entry); }
+    for (const entry of imported) {
+      const prior = entries.get(entry.key);
+      if (prior === undefined || entry.updatedAt > prior.updatedAt) { entries.set(entry.key, entry); }
+    }
+    return Array.from(entries.values()).sort((a: WatchEntry, b: WatchEntry) => b.updatedAt - a.updatedAt);
   }
 
   // ---------- 直播源（按服务端分别保存） ----------

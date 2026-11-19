@@ -98,6 +98,12 @@ class SearchGroupSource implements IDataSource {
 struct SearchPage {
   @State keyword: string = '';
   @State searching: boolean = false;
+  @State failedSources: SourceConfig[] = [];
+  @State failedCount: number = 0;
+  @State retryBatch: boolean = false;
+  private searchTotal: number = 0;
+  private searchDone: number = 0;
+  private retryKeyword: string = '';
   @State statusMsg: string = '';
   @State groups: SearchGroup[] = [];
   /** 来源：fromChildren 从儿童乐园来 / fromPlayer 是播放页换源 */
@@ -369,10 +375,14 @@ struct SearchPage {
         }
       }
     }
-    if (!this.refreshFailed) {
+    if (keepExisting && !this.refreshFailed) {
       this.setGroups([]);
       this.applyIncoming(this.freshResults);
     }
+    this.finishSearch(kw);
+  }
+
+  private finishSearch(kw: string): void {
     this.searching = false;
     const flat: SearchItem[] = [];
     for (const g of this.groups) {
@@ -383,22 +393,48 @@ struct SearchPage {
     if (flat.length === 0 && !this.refreshFailed) { this.session.forgetSearch(kw); }
     else { this.session.rememberSearch(kw, flat); }
     if (this.groups.length === 0 && !this.statusMsg.startsWith('搜索失败')) {
-      this.statusMsg = '没有结果';
+      this.statusMsg = this.refreshFailed ? '部分片源查询失败，暂未找到影片' : '没有结果';
     } else if (this.groups.length > 0) {
-      this.statusMsg = `${this.groups.length} 部 · ${flat.length} 条来源${this.refreshFailed ? ' · 部分来源刷新失败' : ''}`;
+      this.statusMsg = `${this.groups.length} 部 · ${flat.length} 条来源${this.failedCount > 0 ? ` · ${this.failedCount} 个源失败` : ''}`;
     }
     this.refreshSuggestions();
   }
 
+  private async retryFailedSearch(): Promise<void> {
+    if (this.searching || this.failedSources.length === 0 || this.keyword.trim() !== this.searchedKeyword) { return; }
+    const enabled = new Set<string>(this.session.enabledSources().map((src: SourceConfig) => src.url));
+    const sources = this.failedSources.filter((src: SourceConfig) => enabled.has(src.url));
+    this.searchRequests.cancel();
+    this.searchRequests = new SearchRequests();
+    const generation = ++this.searchGeneration;
+    this.searching = true;
+    this.freshResults = [];
+    this.refreshFailed = false;
+    await this.runSearch(this.retryKeyword, generation, sources);
+    if (generation === this.searchGeneration) { this.finishSearch(this.searchedKeyword); }
+  }
+
+  private updateSearchProgress(): void {
+    this.statusMsg = `已查询 ${this.searchDone}/${this.searchTotal} 个源 · 找到 ${this.groups.length} 部`;
+  }
+
   /** 直连源并发跑，剩下的交给服务端一次性聚合 */
-  private async runSearch(kw: string, generation: number): Promise<void> {
+  private async runSearch(kw: string, generation: number, selected?: SourceConfig[]): Promise<void> {
     const api = this.session.api;
     if (api === null) {
       return;
     }
+    const sources = selected ?? this.session.enabledSources();
+    this.searchTotal = sources.length;
+    this.searchDone = 0;
+    this.retryKeyword = kw;
+    this.failedSources = [];
+    this.failedCount = 0;
+    this.retryBatch = false;
+    this.updateSearchProgress();
     const fallback: SourceConfig[] = [];
     const direct: SourceConfig[] = [];
-    for (const src of this.session.enabledSources()) {
+    for (const src of sources) {
       if (this.session.directCms.shouldTryDirect(src)) { direct.push(src); }
       else { fallback.push(src); }
     }
@@ -407,8 +443,9 @@ struct SearchPage {
       ? api.search(kw, initialFallback, this.searchRequests).then((r) => {
         if (generation === this.searchGeneration) {
           this.freshResults.push(...r.items);
-          if (r.failures > 0) { this.refreshFailed = true; }
-          this.applyIncoming(r.items);
+          this.recordSearchBatch(initialFallback, r.failures, r.failedSourceUrls ?? []);
+          if (r.items.length > 0) { this.applyIncoming(r.items); }
+          this.updateSearchProgress();
         }
       }).catch(() => {
         if (generation === this.searchGeneration) { fallback.push(...initialFallback); }
@@ -421,8 +458,9 @@ struct SearchPage {
           const list = await this.session.directCms.search(src, kw, this.searchRequests);
           if (generation !== this.searchGeneration) { return; }
           this.freshResults.push(...list);
-          this.applyIncoming(list);
-          this.statusMsg = `搜索中，已找到 ${this.groups.length} 部`;
+          this.searchDone++;
+          if (list.length > 0) { this.applyIncoming(list); }
+          this.updateSearchProgress();
         } catch (e) {
           if (generation === this.searchGeneration) { fallback.push(src); }
         }
@@ -437,14 +475,27 @@ struct SearchPage {
         const result = await api.search(kw, fallback, this.searchRequests);
         if (generation !== this.searchGeneration) { return; }
         this.freshResults.push(...result.items);
-        if (result.failures > 0) { this.refreshFailed = true; }
-        this.applyIncoming(result.items);
+        this.recordSearchBatch(fallback, result.failures, result.failedSourceUrls ?? []);
+        if (result.items.length > 0) { this.applyIncoming(result.items); }
+        this.updateSearchProgress();
       } catch (e) {
         if (generation !== this.searchGeneration) { return; }
-        this.refreshFailed = true;
+        this.recordSearchBatch(fallback, fallback.length, []);
+        this.updateSearchProgress();
         if (this.groups.length === 0) { this.statusMsg = `搜索失败：${(e as Error).message}`; }
       }
     }
+  }
+
+  private recordSearchBatch(sources: SourceConfig[], count: number, failedUrls: string[]): void {
+    this.searchDone += sources.length;
+    if (count <= 0) { return; }
+    this.refreshFailed = true;
+    this.failedCount += Math.min(count, sources.length);
+    const exact = sources.filter((src: SourceConfig) => failedUrls.includes(src.url));
+    const known = exact.length === count;
+    if (!known && count < sources.length) { this.retryBatch = true; }
+    this.failedSources = [...this.failedSources, ...(known ? exact : sources)];
   }
 
   /**
@@ -777,6 +828,8 @@ struct SearchPage {
                 this.searchedKeyword = '';
                 this.setGroups([]);
                 this.statusMsg = '';
+                this.failedSources = [];
+                this.failedCount = 0;
               }
               this.refreshSuggestions();
             })
@@ -792,6 +845,13 @@ struct SearchPage {
         if (this.statusMsg !== '') {
           Text(this.statusMsg).fontSize(13).fontColor(Theme.SECONDARY)
             .width('100%').padding({ left: 16, right: 16, bottom: 8 })
+        }
+
+        if (!this.searching && this.failedSources.length > 0 && this.keyword.trim() === this.searchedKeyword) {
+          Button(this.retryBatch ? `重试失败批次（${this.failedCount} 个源失败）` : `只重试失败源（${this.failedCount}）`)
+            .fontSize(13).height(36).backgroundColor(Theme.PANEL).fontColor(Theme.ACCENT)
+            .margin({ left: 16, bottom: 8 })
+            .onClick(() => { this.retryFailedSearch(); })
         }
 
         if (this.suggestions.length > 0) {

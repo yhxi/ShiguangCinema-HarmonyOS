@@ -85,6 +85,7 @@ struct LivePlayer {
   private surfaceId: string = '';
   private surfaceReady: boolean = false;
   private prefs: Prefs | null = null;
+  private prefsReady: boolean = false;
   private disposed: boolean = false;
   private generation: number = 0;
   private hideTimer: number = -1;
@@ -112,9 +113,15 @@ struct LivePlayer {
     this.title = this.names.length > this.index ? this.names[this.index] : '直播';
     this.channelSource.setItems(this.filteredChannels());
     Prefs.get(getContext(this)).then((p: Prefs) => {
-      this.prefs = p;
-      this.favoriteKeys = Array.from(LiveLocal.favorites(p));
-    }).catch(() => {});
+      if (!this.disposed) {
+        this.prefs = p;
+        this.favoriteKeys = Array.from(LiveLocal.favorites(p));
+      }
+    }).catch(() => {}).finally(() => {
+      if (this.disposed) { return; }
+      this.prefsReady = true;
+      this.selectChannel(this.index);
+    });
   }
 
   aboutToDisappear(): void {
@@ -208,7 +215,7 @@ struct LivePlayer {
   }
 
   private async setupPlayer(): Promise<void> {
-    if (this.disposed || !this.surfaceReady || this.urls.length === 0) {
+    if (this.disposed || !this.surfaceReady || !this.prefsReady || this.urls.length === 0) {
       return;
     }
     const generation = ++this.generation;
@@ -295,6 +302,7 @@ struct LivePlayer {
       this.stopStartupTimer();
       this.triedLines.clear();
       this.triedLines.add(this.index);
+      if (this.prefs !== null) { LiveLocal.rememberLine(this.prefs, this.title, this.urls[this.index]).catch(() => {}); }
       this.loadMessage = '';
     });
     p.on('videoSizeChange', (width: number, height: number) => {
@@ -348,15 +356,21 @@ struct LivePlayer {
 
   private switchChannel(delta: number): void {
     if (this.urls.length === 0) { return; }
-    const next = stepLiveChannel(this.index, delta, this.urls.length);
-    if (next < 0 || next === this.index) { return; }
-    this.selectChannel(next);
+    const key = liveChannelKey(this.names[this.index] ?? '');
+    for (let step = 1; step < this.urls.length; step++) {
+      const next = stepLiveChannel(this.index, delta * step, this.urls.length);
+      if (next < 0 || next === this.index) { return; }
+      if (key === '' || liveChannelKey(this.names[next] ?? '') !== key) {
+        this.selectChannel(next);
+        return;
+      }
+    }
   }
 
   private selectChannel(next: number): void {
     this.triedLines.clear();
-    this.index = next;
-    this.title = next < this.names.length ? this.names[next] : `频道 ${next + 1}`;
+    this.index = this.prefs !== null ? LiveLocal.preferredIndex(this.prefs, this.urls, this.names, next) : next;
+    this.title = this.index < this.names.length ? this.names[this.index] : `频道 ${this.index + 1}`;
     this.showList = false;
     this.setupPlayer();
   }

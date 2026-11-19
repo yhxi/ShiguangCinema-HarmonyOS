@@ -7,10 +7,11 @@
 
 import { Channel } from '../api/Models';
 import { Prefs } from './Prefs';
-import { inspectLocalLivePlaylist, LivePlaylistReport, sortedLiveChannels } from '../api/LivePlaylist';
+import { liveChannelKey, inspectLocalLivePlaylist, LivePlaylistReport, sortedLiveChannels } from '../api/LivePlaylist';
 
 const KEY_CHANNELS = 'liveLocalChannels';
 const KEY_FAVORITES = 'liveFavoriteKeys';
+const KEY_LAST_WORKING_LINE = 'liveLastWorkingLine';
 
 function channelToObj(c: Channel): Record<string, Object> {
   return {
@@ -23,6 +24,22 @@ function channelToObj(c: Channel): Record<string, Object> {
 }
 
 export class LiveLocal {
+  static preferredIndex(prefs: Prefs, urls: string[], names: string[], selected: number): number {
+    const key = liveChannelKey(names[selected] ?? '');
+    const saved = prefs.getRaw(KEY_LAST_WORKING_LINE + ':' + key, '');
+    if (key === '' || saved === '') { return selected; }
+    const index = urls.findIndex((url: string, i: number) => url === saved && liveChannelKey(names[i] ?? '') === key);
+    return index >= 0 ? index : selected;
+  }
+
+  static async rememberLine(prefs: Prefs, name: string, url: string): Promise<void> {
+    const key = liveChannelKey(name);
+    if (key === '' || url === '') { return; }
+    const storageKey = KEY_LAST_WORKING_LINE + ':' + key;
+    if (prefs.getRaw(storageKey, '') === url) { return; }
+    await prefs.putRaw(storageKey, url);
+  }
+
   /** 读取本地导入的频道；返回时已按「央视 → 地方 → 其他」排好序 */
   static load(prefs: Prefs): Channel[] {
     const raw = prefs.getRaw(KEY_CHANNELS, '');

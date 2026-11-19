@@ -64,6 +64,7 @@ export interface AppStatus {
 export interface SearchResult {
   items: SearchItem[];
   failures: number;
+  failedSourceUrls?: string[];
 }
 
 export class HttpError extends Error {

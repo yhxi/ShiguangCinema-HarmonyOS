@@ -131,8 +131,8 @@ export class Api {
     }
   }
 
-  private async getText(path: string, readTimeoutMs: number = DEFAULT_READ_TIMEOUT_MS): Promise<string> {
-    return this.request(path, 'GET', null, readTimeoutMs);
+  private async getText(path: string, readTimeoutMs: number = DEFAULT_READ_TIMEOUT_MS, requests?: SearchRequests): Promise<string> {
+    return this.request(path, 'GET', null, readTimeoutMs, requests);
   }
 
   private async postJson(path: string, body: string, readTimeoutMs: number): Promise<string> {
@@ -239,17 +239,21 @@ export class Api {
         });
       }
     }
-    let failures = 0;
-    const failArr = getArr(root, 'failures');
-    if (failArr !== null) {
-      failures = failArr.length;
+    const failedSourceUrls: string[] = [];
+    const failArr = getArr(root, 'failures') ?? [];
+    for (const failure of failArr) {
+      const item = asObj(failure);
+      const url = item === null ? s(failure) : s(item['sourceUrl']) || s(item['url']);
+      const name = item === null ? s(failure) : s(item['sourceName']) || s(item['name']);
+      const matching = sources.filter((src: SourceConfig) => src.url === url || src.name === name);
+      if (matching.length === 1 && !failedSourceUrls.includes(matching[0].url)) { failedSourceUrls.push(matching[0].url); }
     }
-    return { items: items, failures: failures };
+    return { items: items, failures: failArr.length, failedSourceUrls: failedSourceUrls };
   }
 
-  async detail(vodId: string, source: SourceConfig): Promise<Detail> {
+  async detail(vodId: string, source: SourceConfig, requests?: SearchRequests): Promise<Detail> {
     const path = `/api/detail?id=${encodeURIComponent(vodId)}&source=${encodeURIComponent(sourceToJson(source))}`;
-    const root = parseObj(await this.getText(path, DETAIL_READ_TIMEOUT_MS));
+    const root = parseObj(await this.getText(path, DETAIL_READ_TIMEOUT_MS, requests));
     if (root['error'] !== undefined) {
       throw new Error(s(root['error'], '获取详情失败'));
     }

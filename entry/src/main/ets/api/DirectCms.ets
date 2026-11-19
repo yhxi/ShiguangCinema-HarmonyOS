@@ -148,8 +148,8 @@ export class DirectCms {
   }
 
   /** 详情。返回的 episodes 已是纯播放地址数组，和服务端 /api/detail 对齐。 */
-  async detail(src: SourceConfig, vodId: string): Promise<Detail> {
-    const root = await this.getSourceJson(src, this.buildUrl(src.url, null, vodId));
+  async detail(src: SourceConfig, vodId: string, requests?: SearchRequests): Promise<Detail> {
+    const root = await this.getSourceJson(src, this.buildUrl(src.url, null, vodId), requests);
     const list = getArr(root, 'list');
     let item: JsonObj | null = null;
     if (list !== null && list.length > 0) {

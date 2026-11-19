@@ -60,7 +60,8 @@ test('search queries initial server sources once and retries only failures', asy
   const start = src.indexOf('  private async runSearch(');
   const end = src.indexOf('\n  /**', start);
   const method = src.slice(start, end).replace('private async runSearch', 'async runSearch');
-  const { SearchHarness } = load(`export class SearchHarness { ${method} }`);
+  const progress = src.slice(src.indexOf('  private updateSearchProgress()'), src.indexOf('  /** 直连源并发跑', src.indexOf('  private updateSearchProgress()')));
+  const { SearchHarness } = load(`export class SearchHarness { ${method} ${progress} }`);
   const calls = [];
   const h = new SearchHarness();
   h.searchGeneration = 1; h.groups = []; h.freshResults = []; h.refreshFailed = false; h.applyIncoming = () => {};
@@ -68,7 +69,7 @@ test('search queries initial server sources once and retries only failures', asy
     enabledSources: () => [{url: 'server'}, {url: 'direct-ok'}, {url: 'direct-fail'}],
     directCms: { shouldTryDirect: s => s.url.startsWith('direct'),
       search: async s => { if (s.url === 'direct-fail') throw new Error('offline'); return []; } },
-    api: { search: async (_, sources) => { calls.push(sources.map(s => s.url)); return {items: []}; } }
+    api: { search: async (_, sources) => { calls.push(sources.map(s => s.url)); return {items: [], failures: 0}; } }
   };
   await h.runSearch('test', 1);
   assert.equal(JSON.stringify(calls), JSON.stringify([['server'], ['direct-fail']]));
@@ -532,4 +533,55 @@ test('a long stall switches source at the last position, while progress and paus
   assert.match(player.replacementFailureMessage('无同一集'), /无法播放/);
   player.replacementFailure = 'seek';
   assert.match(player.replacementFailureMessage('无同一集'), /无法跳到原进度/);
+});
+
+test('viewing backup merges without duplicates, preserves newer progress and excludes login data', async () => {
+  const json = load(fs.readFileSync('entry/src/main/ets/api/JsonUtil.ets', 'utf8'));
+  const { Prefs, entryFromStatus } = load(fs.readFileSync('entry/src/main/ets/store/Prefs.ets', 'utf8'),
+    name => name.includes('JsonUtil') ? json : {});
+  const make = () => {
+    const prefs = new Prefs();
+    const values = {};
+    prefs.store = { getAll: async () => ({...values}), getSync: (k, d) => values[k] ?? d,
+      put: async (k, value) => { values[k] = value; }, flush: async () => {} };
+    return prefs;
+  };
+  const src = make();
+  const dest = make();
+  const server = 'https://server.test';
+  const url = 'https://source.test/api';
+  const old = entryFromStatus(server, url, 'id', '剧集', '', 1, 20, 12000, 100000);
+  await src.saveWatch({ ...old, updatedAt: 1 });
+  await src.toggleFavorite(old);
+  await src.setCookie(server, 'secret-cookie');
+  await src.setSkipMarks('剧集', {introEndMs:70000,outroStartMs:0,autoIntro:true,autoOutro:false,
+    outroRemainingMs:0,outroReferenceMs:0});
+  const text = await src.exportViewingBackup(server, [
+    { name:'片源', url, detail:'', isAdult:false, enabled:false },
+    { name:'私有源', url:'https://users.test/api?token=secret-token', detail:'', isAdult:false, enabled:true }
+  ]);
+  assert.ok(!text.includes('secret-cookie') && !text.includes('secret-token'));
+  await dest.saveWatch({ ...old, positionMs: 99000, updatedAt: 2 });
+  let sources = await dest.restoreViewingBackup(text, server, []);
+  sources = await dest.restoreViewingBackup(text, server, sources);
+  assert.equal(sources.length, 1);
+  assert.equal(sources[0].enabled, false);
+  assert.equal((await dest.getHistory())[0].positionMs, 99000);
+  assert.equal((await dest.getFavorites()).length, 1);
+  assert.equal((await dest.getSkipMarks('剧集')).introEndMs, 70000);
+  const corrupted = JSON.parse(text);
+  corrupted.marks[0].marks.introEndMs = 'invalid';
+  await assert.rejects(dest.restoreViewingBackup(JSON.stringify(corrupted), server, sources), /跳过时间无效/);
+  assert.equal((await dest.getHistory()).length, 1);
+});
+
+test('live source preference only restores a working line of the selected channel', async () => {
+  const src = fs.readFileSync('entry/src/main/ets/store/LiveLocal.ets', 'utf8');
+  const { LiveLocal } = load(src, name => name.includes('LivePlaylist') ? { liveChannelKey: name => name } : {});
+  const values = {};
+  const prefs = { getRaw: (key, fallback) => values[key] ?? fallback,
+    putRaw: async (key, value) => { values[key] = value; } };
+  await LiveLocal.rememberLine(prefs, 'CCTV1', 'backup');
+  assert.equal(LiveLocal.preferredIndex(prefs, ['first','backup','other'], ['CCTV1','CCTV1','CCTV2'], 0), 1);
+  assert.equal(LiveLocal.preferredIndex(prefs, ['first','backup'], ['CCTV1','CCTV2'], 0), 0);
 });

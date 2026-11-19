@@ -1,3 +1,4 @@
+import { SearchRequests } from '../api/DirectCms';
 import { matchEpisodeIndex } from '../common/EpisodeMatch';
 /**
  * 播放页 —— AVPlayer + XComponent：
@@ -138,6 +139,12 @@ struct Player {
   private sameUrlRetried: boolean = false;
   private sourceSwitchTried: boolean = false;
   private replacementFailure: string = '';
+  private sourceLookup: SearchRequests | null = null;
+  private replacementNeedsProgress: boolean = false;
+  private replacementFrame: boolean = false;
+  private replacementStartMs: number = -1;
+  private replacementName: string = '';
+  private replacementResumeMs: number = 0;
   private stallPositionMs: number = -1;
   private stallSince: number = 0;
   /** 换源时已尝试过、不再回头的片源地址 */
@@ -284,12 +291,14 @@ struct Player {
     if (this.showEpisodes) { this.showEpisodes = false; this.scheduleHide(); return true; }
     if (this.locked) { this.locked = false; this.scheduleHide(); return true; }
     if (this.pureFullscreen) { this.toggleFullscreen(); return true; }
+    this.saveProgress(true);
     return false;
   }
 
   aboutToDisappear(): void {
     this.endTemporarySpeed();
     this.disposed = true;
+    this.sourceLookup?.cancel();
     this.playerGeneration++;
     this.saveProgress(true);
     this.stopSaveTimer();
@@ -376,6 +385,8 @@ struct Player {
     this.switching = true;
     this.playing = false;
     this.firstFrameSeen = false;
+    this.replacementFrame = false;
+    this.replacementStartMs = -1;
     this.effectiveSpeed = 1;
     this.recoverySeekPending = false;
     this.introSeekPending = false;
@@ -491,7 +502,8 @@ struct Player {
         this.buffering = false;
         this.stopSpeedTimer();
         this.netSpeed = '';
-        this.switching = false;
+        this.switching = this.replacementNeedsProgress;
+        if (this.replacementNeedsProgress) { this.replacementStartMs = this.curMs; }
         if (!this.isLive && this.resumeMs > 0) {
           const resume = this.resumeMs;
           this.resumeMs = 0;
@@ -560,7 +572,12 @@ struct Player {
       this.playPreparedVideo(p, generation);
     });
     p.on('startRenderFrame', () => {
-      if (this.disposed || generation !== this.playerGeneration || this.recoverySeekPending || this.introSeekPending) { return; }
+      if (this.disposed || generation !== this.playerGeneration) { return; }
+      if (this.replacementNeedsProgress) {
+        this.replacementFrame = true;
+        return;
+      }
+      if (this.recoverySeekPending || this.introSeekPending) { return; }
       this.firstFrameSeen = true;
       this.saveStartedEpisode();
       // 起播成功后重置自愈状态：之后的失败可以再走一轮"重试 → 换源"
@@ -600,6 +617,21 @@ struct Player {
     p.on('timeUpdate', (time: number) => {
       if (!this.disposed && generation === this.playerGeneration && !this.userDragging && !this.recoverySeekPending && !this.introSeekPending) {
         this.curMs = time;
+        if (this.replacementNeedsProgress) {
+          if (!this.playing || this.replacementStartMs < 0 || time < this.replacementStartMs + 300 ||
+            (p.width > 0 && !this.replacementFrame)) { return; }
+          this.replacementNeedsProgress = false;
+          this.replacementResumeMs = 0;
+          this.switching = false;
+          this.firstFrameSeen = true;
+          this.replacementFailure = '';
+          this.sameUrlRetried = false;
+          this.sourceSwitchTried = false;
+          this.loadMessage = '';
+          this.stopStartupTimer();
+          this.notify(`已切换至：${this.replacementName}`);
+          this.saveStartedEpisode();
+        }
         this.applySkipMarks(time);
         if (time > 0 && p.width > 0 && !this.lookingForSource) {
           this.firstFrameSeen = true;
@@ -671,6 +703,10 @@ struct Player {
 
   private keepRecoveryPosition(): void {
     if (this.isLive || this.recoveryPositionMs > 0) { return; }
+    if (this.replacementNeedsProgress && this.replacementResumeMs > 0) {
+      this.recoveryPositionMs = this.replacementResumeMs;
+      return;
+    }
     const position = this.curMs > 0 ? this.curMs : this.resumeMs;
     if (Number.isFinite(position) && position > 0 && (this.durMs <= 0 || position < this.durMs)) {
       this.recoveryPositionMs = position;
@@ -741,15 +777,29 @@ struct Player {
 
   /** 只尝试包含当前集的备用源。手动换源时，找到候选前保留原播放器。 */
   private async switchToNextSource(manual: boolean = false): Promise<void> {
+    const requests = new SearchRequests();
+    this.sourceLookup = requests;
     this.lookingForSource = true;
+    const timeout = setTimeout(() => {
+      requests.cancel();
+      if (!this.disposed && this.sourceLookup === requests) {
+        this.sourceLookup = null;
+        this.lookingForSource = false;
+        this.finishHealFail(this.replacementFailureMessage('备用片源查询超时（24 秒）'), manual);
+      }
+    }, 24000);
     try {
-      await this.findReplacementSource(manual);
+      await this.findReplacementSource(manual, requests);
     } finally {
-      this.lookingForSource = false;
+      clearTimeout(timeout);
+      if (this.sourceLookup === requests) {
+        this.sourceLookup = null;
+        this.lookingForSource = false;
+      }
     }
   }
 
-  private async findReplacementSource(manual: boolean): Promise<void> {
+  private async findReplacementSource(manual: boolean, requests: SearchRequests): Promise<void> {
     const generation = this.playerGeneration;
     const api = this.session.api;
     if (api === null || this.title.trim() === '') {
@@ -762,32 +812,32 @@ struct Player {
       return;
     }
     const cached = this.session.cachedSearch(this.title.trim());
-    if (await this.trySourceCandidates(cached, generation)) { return; }
-    if (this.disposed || generation !== this.playerGeneration) { return; }
+    if (await this.trySourceCandidates(cached, generation, requests)) { return; }
+    if (this.disposed || requests?.cancelled || generation !== this.playerGeneration) { return; }
     try {
       const remaining = sources.filter((src: SourceConfig) => !this.triedSourceUrls.has(src.url));
       if (remaining.length > 0) {
-        const result = await api.search(this.title.trim(), remaining);
-        if (this.disposed || generation !== this.playerGeneration) { return; }
+        const result = await api.search(this.title.trim(), remaining, requests);
+        if (this.disposed || requests?.cancelled || generation !== this.playerGeneration) { return; }
         if (result.failures > 0 && this.replacementFailure === '') { this.replacementFailure = 'lookup'; }
-        if (await this.trySourceCandidates(result.items, generation)) { return; }
+        if (await this.trySourceCandidates(result.items, generation, requests)) { return; }
       }
     } catch (e) {
-      if (!this.disposed && generation === this.playerGeneration && this.replacementFailure === '') {
+      if (!this.disposed && !requests?.cancelled && generation === this.playerGeneration && this.replacementFailure === '') {
         this.replacementFailure = 'lookup';
       }
       hilog.warn(0, 'ShiguangCinema', 'source switch search failed');
     }
-    if (!this.disposed && generation === this.playerGeneration) {
+    if (!this.disposed && !requests?.cancelled && generation === this.playerGeneration) {
       this.finishHealFail(this.replacementFailureMessage('其他片源找不到可确认的同一集'), manual);
     }
   }
 
-  private async trySourceCandidates(items: SearchItem[], generation: number): Promise<boolean> {
+  private async trySourceCandidates(items: SearchItem[], generation: number, requests?: SearchRequests): Promise<boolean> {
     const api = this.session.api;
     if (api === null) { return false; }
     for (const item of items) {
-      if (this.disposed || generation !== this.playerGeneration) { return false; }
+      if (this.disposed || requests?.cancelled || generation !== this.playerGeneration) { return false; }
       if (item.name !== this.title.trim() || this.triedSourceUrls.has(item.sourceUrl)) { continue; }
       const src = this.findSourceByUrl(item.sourceUrl);
       if (src === null || !src.enabled) { continue; }
@@ -795,18 +845,18 @@ struct Player {
       let detail: Detail;
       try {
         if (this.session.directCms.shouldTryDirect(src)) {
-          try { detail = await this.session.directCms.detail(src, item.vodId); }
-          catch (e) { detail = await api.detail(item.vodId, src); }
+          try { detail = await this.session.directCms.detail(src, item.vodId, requests); }
+          catch (e) { detail = await api.detail(item.vodId, src, requests); }
         } else {
-          detail = await api.detail(item.vodId, src);
+          detail = await api.detail(item.vodId, src, requests);
         }
       } catch (e) {
-        if (!this.disposed && generation === this.playerGeneration && this.replacementFailure === '') {
+        if (!this.disposed && !requests?.cancelled && generation === this.playerGeneration && this.replacementFailure === '') {
           this.replacementFailure = 'lookup';
         }
         continue;
       }
-      if (this.disposed || generation !== this.playerGeneration) { return false; }
+      if (this.disposed || requests?.cancelled || generation !== this.playerGeneration) { return false; }
       const labels = detail.episodeLabels ?? [];
       const index = matchEpisodeIndex(this.episodeIndex, this.episodes, this.episodeLabels, detail.episodes, labels);
       if (index < 0 || detail.episodes[index].trim() === '') { continue; }
@@ -825,9 +875,9 @@ struct Player {
       this.curMs = 0;
       this.durMs = 0;
       this.switching = false;
-      this.gestureMessage = `正在切换至：${item.sourceName}`;
-      if (this.hudTimer >= 0) { clearTimeout(this.hudTimer); }
-      this.hudTimer = setTimeout(() => { this.gestureMessage = ''; }, 2500);
+      this.replacementNeedsProgress = true;
+      this.replacementName = item.sourceName;
+      this.replacementResumeMs = this.recoveryPositionMs;
       this.setupPlayer();
       return true;
     }
@@ -850,6 +900,7 @@ struct Player {
 
   /** 自愈全部失败：给出结论和手动换源提示 */
   private finishHealFail(reason: string, manual: boolean = false): void {
+    this.replacementNeedsProgress = false;
     this.switching = false;
     this.sourceSwitchTried = false;
     this.loadMessage = '';
@@ -1268,7 +1319,8 @@ struct Player {
 
   private saveProgress(final: boolean): void {
     const p = this.player;
-    if (p === null || this.durMs <= 0 || this.recoverySeekPending || this.introSeekPending || this.saveNextOnStart) { return; }
+    if (p === null || this.durMs <= 0 || this.recoverySeekPending || this.introSeekPending ||
+      this.replacementNeedsProgress || this.saveNextOnStart) { return; }
     this.writeProgress(final ? p.currentTime : this.curMs, this.durMs, final);
   }
 
@@ -1464,15 +1516,10 @@ struct Player {
     this.switchToNextSource(true);
   }
 
-  /** 普通返回：保存进度、停止播放，直接回首页（v1.3.11） */
-  private leaveToHome(): void {
+  /** 返回详情、历史或首页中发起播放的位置。 */
+  private leavePlayback(): void {
     this.saveProgress(true);
-    this.stopQuotaTimer();
-    try {
-      router.back({ url: 'pages/Index' });
-    } catch (e) {
-      router.back();
-    }
+    router.back();
   }
 
   private toggleFullscreen(): void {
@@ -1659,7 +1706,7 @@ struct Player {
       items.push({ label: '音轨 / 字幕', action: () => { this.activeMenu = 'tracks'; } });
       items.push({ label: this.sleepMinutes > 0 ? `定时暂停：${this.sleepMinutes} 分钟` : '定时暂停', action: () => { this.activeMenu = 'sleep'; } });
       items.push({ label: '锁定操作', action: () => { this.locked = true; this.activeMenu = ''; this.showControls = false; } });
-      items.push({ label: '退出播放', action: () => { this.leaveToHome(); } });
+      items.push({ label: '退出播放', action: () => { this.leavePlayback(); } });
     }
     return items;
   }
@@ -1836,7 +1883,7 @@ struct Player {
           Row({ space: 10 }) {
             Text('<').fontSize(22).fontColor('#FFFFFF')
               .padding(10)
-              .onClick(() => { this.leaveToHome(); })
+              .onClick(() => { this.leavePlayback(); })
             Text(this.isLive
               ? `${this.title} · 直播`
               : `${this.title} · ${this.episodeTitle(this.episodeIndex)}`)

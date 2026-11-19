@@ -34,6 +34,7 @@ struct DetailPage {
   @State cacheNotice: string = '';
   @State episodes: string[] = [];
   private episodeLabels: string[] = [];
+  private returningFromPlayback: boolean = false;
   @State info: Record<string, string> = {
     'title': '', 'cover': '', 'desc': '', 'remarks': '', 'year': '', 'area': '', 'actor': ''
   };
@@ -105,6 +106,17 @@ struct DetailPage {
         this.loadDetail();
       }
     });
+  }
+
+  onPageShow(): void {
+    const prefs = this.prefs;
+    if (!this.returningFromPlayback || prefs === null) { return; }
+    this.returningFromPlayback = false;
+    const key = watchKey(this.session.serverUrl, this.sourceUrl, this.vodId);
+    prefs.getHistory().then((entries: WatchEntry[]) => {
+      const updated = entries.find((entry: WatchEntry) => entry.key === key);
+      if (updated !== undefined) { this.lastWatch = updated; }
+    }).catch(() => {});
   }
 
   /** 只是把缓存里的选集铺上去；标题等元信息仍等网络回来再填 */
@@ -264,6 +276,8 @@ struct DetailPage {
     }
     const resumeMs = (this.lastWatch !== null && this.resumeEpisodeIndex() === index)
       ? this.lastWatch.positionMs : 0;
+    this.selected = index;
+    this.returningFromPlayback = true;
     router.pushUrl({
       url: 'pages/Player',
       params: {
@@ -276,7 +290,7 @@ struct DetailPage {
         'vodId': this.vodId,
         'resumeMs': resumeMs.toString()
       } as RouteParams
-    });
+    }).catch(() => { this.returningFromPlayback = false; });
   }
 
   private async toggleFav(): Promise<void> {

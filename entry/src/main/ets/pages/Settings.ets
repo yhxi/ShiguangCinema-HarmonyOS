@@ -1,3 +1,5 @@
+import { fileIo as fs, picker } from '@kit.CoreFileKit';
+import { util } from '@kit.ArkTS';
 import { pasteboard } from '@kit.BasicServicesKit';
 import { promptAction, router, window } from '@kit.ArkUI';
 import { bundleManager, common } from '@kit.AbilityKit';
@@ -35,6 +37,7 @@ struct SettingsPage {
   private settingsWindow: window.Window | null = null;
   private prefs: Prefs | null = null;
   private updateChecking: boolean = false;
+  private backupBusy: boolean = false;
 
   aboutToAppear(): void {
     // 版本号直接读包信息，避免以后升级时忘了改这里的硬编码
@@ -84,6 +87,65 @@ struct SettingsPage {
     this.session.clearSearchCache();
     promptAction.showToast({ message: cleared ? '选集、详情和搜索缓存已清理，海报已保留' :
       '内存缓存已清理，选集缓存清理失败；海报已保留' });
+  }
+
+  private async viewingBackup(): Promise<void> {
+    const prefs = this.prefs;
+    const server = this.session.serverUrl;
+    if (this.backupBusy) { return; }
+    if (prefs === null || server === '') { promptAction.showToast({ message: '请先连接服务端' }); return; }
+    this.backupBusy = true;
+    try {
+      const choice = await promptAction.showActionMenu({
+        title: '观看备份',
+        buttons: [{ text: '导出备份', color: Theme.INK }, { text: '合并恢复', color: Theme.INK }]
+      }).catch(() => null);
+      if (choice === null) { return; }
+      const documentPicker = new picker.DocumentViewPicker(getContext(this));
+      if (choice.index === 0) {
+        const text = await prefs.exportViewingBackup(server, this.session.sources);
+        const save = new picker.DocumentSaveOptions();
+        save.newFileNames = ['ShiguangCinema-HarmonyOS-backup.json'];
+        const uris = await documentPicker.save(save);
+        if (uris.length === 0) { return; }
+        const file = await fs.open(uris[0], fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
+        try {
+          const bytes = new util.TextEncoder().encodeInto(text);
+          if (await fs.write(file.fd, bytes.buffer) !== bytes.byteLength) { throw new Error('写入备份不完整'); }
+        } finally { await fs.close(file); }
+        promptAction.showToast({ message: '观看备份已保存' });
+      } else if (choice.index === 1) {
+        const select = new picker.DocumentSelectOptions();
+        select.maxSelectNumber = 1;
+        select.fileSuffixFilters = ['.json'];
+        const uris = await documentPicker.select(select);
+        if (uris.length === 0) { return; }
+        const confirm = await promptAction.showDialog({
+          title: '合并恢复观看备份？', message: '保留较新的观看记录，合并收藏和跳过标记，并恢复备份片源的启停状态。',
+          buttons: [{ text: '取消', color: Theme.INK }, { text: '合并恢复', color: Theme.ACCENT }]
+        }).catch(() => null);
+        if (confirm?.index !== 1 || server !== this.session.serverUrl) { return; }
+        const file = await fs.open(uris[0], fs.OpenMode.READ_ONLY);
+        let buffer: ArrayBuffer;
+        try {
+          const stat = await fs.stat(file.fd);
+          if (stat.size <= 0 || stat.size > 4 * 1024 * 1024) { throw new Error('备份文件须小于 4 MB'); }
+          buffer = new ArrayBuffer(stat.size);
+          if (await fs.read(file.fd, buffer) !== stat.size) { throw new Error('无法完整读取备份'); }
+        } finally { await fs.close(file); }
+        const text = util.TextDecoder.create('utf-8').decodeToString(new Uint8Array(buffer));
+        if (server !== this.session.serverUrl) { return; }
+        const sources = await prefs.restoreViewingBackup(text, server, this.session.sources);
+        if (server === this.session.serverUrl) {
+          this.session.sources = sources;
+          this.session.clearSearchCache();
+          this.pointSourceCount = sources.length;
+        }
+        promptAction.showToast({ message: '观看备份已合并' });
+      }
+    } catch (e) {
+      promptAction.showToast({ message: `观看备份操作失败：${(e as Error).message}` });
+    } finally { this.backupBusy = false; }
   }
 
   private showUpdateInfo(): void {
@@ -210,6 +272,8 @@ struct SettingsPage {
           .width('100%').padding({ top: 22, bottom: 10 })
         this.card({ icon: '▣', title: '应用图标', subtitle: '六款主题，切换桌面图标',
           action: () => { router.pushUrl({ url: 'pages/AppIcons' }); } })
+        this.card({ icon: '▤', title: '观看备份', subtitle: '导出或合并观看历史、收藏、片源和跳过标记',
+          action: () => { this.viewingBackup(); } })
         this.card({ icon: '◷', title: '清理缓存', subtitle: '管理本地缓存占用', action: () => { this.clearCache(); } })
         this.card({ icon: '⌕', title: '网络诊断', subtitle: '检测连接和片源响应',
           action: () => { router.pushUrl({ url: 'pages/NetDiag' }); } })
