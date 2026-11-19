@@ -137,6 +137,9 @@ struct Player {
   /** 自愈：同源已重试过一次 / 已尝试过自动换源 */
   private sameUrlRetried: boolean = false;
   private sourceSwitchTried: boolean = false;
+  private replacementFailure: string = '';
+  private stallPositionMs: number = -1;
+  private stallSince: number = 0;
   /** 换源时已尝试过、不再回头的片源地址 */
   private triedSourceUrls: Set<string> = new Set();
   private startupTimer: number = -1;
@@ -563,6 +566,7 @@ struct Player {
       // 起播成功后重置自愈状态：之后的失败可以再走一轮"重试 → 换源"
       this.sameUrlRetried = false;
       this.sourceSwitchTried = false;
+      this.replacementFailure = '';
       this.loadMessage = '';
       this.errorMsg = '';
       this.stopStartupTimer();
@@ -674,6 +678,7 @@ struct Player {
   }
 
   private rejectRecoverySource(): void {
+    if (this.replacementFailure === 'play') { this.replacementFailure = 'seek'; }
     this.recoverySeekPending = false;
     this.loadMessage = '当前片源无法恢复进度，正在尝试其他片源…';
     this.playerGeneration++;
@@ -753,7 +758,7 @@ struct Player {
     }
     const sources = this.session.enabledSources().filter((src) => !this.triedSourceUrls.has(src.url));
     if (sources.length === 0) {
-      this.finishHealFail('没有其他可尝试的片源', manual);
+      this.finishHealFail(this.replacementFailureMessage('没有其他可尝试的片源'), manual);
       return;
     }
     const cached = this.session.cachedSearch(this.title.trim());
@@ -764,13 +769,17 @@ struct Player {
       if (remaining.length > 0) {
         const result = await api.search(this.title.trim(), remaining);
         if (this.disposed || generation !== this.playerGeneration) { return; }
+        if (result.failures > 0 && this.replacementFailure === '') { this.replacementFailure = 'lookup'; }
         if (await this.trySourceCandidates(result.items, generation)) { return; }
       }
     } catch (e) {
+      if (!this.disposed && generation === this.playerGeneration && this.replacementFailure === '') {
+        this.replacementFailure = 'lookup';
+      }
       hilog.warn(0, 'ShiguangCinema', 'source switch search failed');
     }
     if (!this.disposed && generation === this.playerGeneration) {
-      this.finishHealFail('其他片源找不到可确认的同一集', manual);
+      this.finishHealFail(this.replacementFailureMessage('其他片源找不到可确认的同一集'), manual);
     }
   }
 
@@ -791,11 +800,17 @@ struct Player {
         } else {
           detail = await api.detail(item.vodId, src);
         }
-      } catch (e) { continue; }
+      } catch (e) {
+        if (!this.disposed && generation === this.playerGeneration && this.replacementFailure === '') {
+          this.replacementFailure = 'lookup';
+        }
+        continue;
+      }
       if (this.disposed || generation !== this.playerGeneration) { return false; }
       const labels = detail.episodeLabels ?? [];
       const index = matchEpisodeIndex(this.episodeIndex, this.episodes, this.episodeLabels, detail.episodes, labels);
       if (index < 0 || detail.episodes[index].trim() === '') { continue; }
+      if (this.replacementFailure !== 'seek') { this.replacementFailure = 'play'; }
       this.episodeIndex = index;
       this.episodes = detail.episodes;
       this.episodeLabels = labels;
@@ -824,6 +839,13 @@ struct Player {
       if (src.url === url) { return src; }
     }
     return null;
+  }
+
+  private replacementFailureMessage(fallback: string): string {
+    if (this.replacementFailure === 'seek') { return '找到同一集，但备用片源无法跳到原进度'; }
+    if (this.replacementFailure === 'play') { return '找到同一集，但备用片源无法播放'; }
+    if (this.replacementFailure === 'lookup') { return '备用片源查询失败或不完整，请检查网络后重试'; }
+    return fallback;
   }
 
   /** 自愈全部失败：给出结论和手动换源提示 */
@@ -1109,6 +1131,7 @@ struct Player {
     this.alternateTried = false;
     this.sameUrlRetried = false;
     this.sourceSwitchTried = false;
+    this.replacementFailure = '';
     this.triedSourceUrls = new Set([this.sourceUrl]);
     this.curMs = 0;
     this.durMs = 0;
@@ -1127,6 +1150,7 @@ struct Player {
     this.alternateTried = false;
     this.sameUrlRetried = false;
     this.sourceSwitchTried = false;
+    this.replacementFailure = '';
     this.triedSourceUrls = new Set([this.sourceUrl]);
     this.curMs = 0;
     this.durMs = 0;
@@ -1143,6 +1167,7 @@ struct Player {
     this.alternateTried = false;
     this.sameUrlRetried = false;
     this.sourceSwitchTried = false;
+    this.replacementFailure = '';
     this.triedSourceUrls = new Set([this.sourceUrl]);
     this.errorMsg = '';
     this.setupPlayer();
@@ -1187,11 +1212,34 @@ struct Player {
   private startSaveTimer(): void {
     this.stopSaveTimer();
     this.saveTick = 0;
+    this.stallPositionMs = this.curMs;
+    this.stallSince = Date.now();
     this.saveTimerId = setInterval(() => {
+      if (this.checkPlaybackStall(Date.now())) { return; }
       this.saveTick++;
       if (this.saveTick % 6 === 0) { this.saveProgress(false); }
       if (this.backgroundSession !== null) { this.updateBackgroundSession(this.playing); }
     }, 5000);
+  }
+
+  private checkPlaybackStall(now: number): boolean {
+    if (this.disposed || this.isLive || !this.playing || !this.firstFrameSeen || this.switching ||
+      this.lookingForSource || this.userDragging || this.errorMsg !== '' || this.quotaPausePending ||
+      this.recoverySeekPending || this.introSeekPending || this.durMs <= 0 || this.curMs >= this.durMs - 1000 ||
+      this.stallPositionMs !== this.curMs || this.stallSince <= 0 || now < this.stallSince) {
+      this.stallPositionMs = this.curMs;
+      this.stallSince = now;
+      return false;
+    }
+    if (now - this.stallSince < 20000) { return false; }
+    this.stallSince = now;
+    this.keepRecoveryPosition();
+    this.switching = true;
+    this.sourceSwitchTried = true;
+    this.showControls = true;
+    this.loadMessage = '播放卡顿，正在寻找备用片源…';
+    this.switchToNextSource();
+    return true;
   }
 
   private stopSaveTimer(): void {
@@ -1408,6 +1456,7 @@ struct Player {
     if (this.isLive || this.switching || this.lookingForSource) { return; }
     this.saveProgress(true);
     this.keepRecoveryPosition();
+    this.replacementFailure = '';
     this.triedSourceUrls = new Set([this.sourceUrl]);
     this.switching = true;
     this.loadMessage = '正在寻找可用片源…';

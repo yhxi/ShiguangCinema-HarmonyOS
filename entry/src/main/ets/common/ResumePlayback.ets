@@ -1,3 +1,4 @@
+import { historyEpisodeIndex } from './EpisodeMatch';
 import { Context } from '@kit.AbilityKit';
 import { Detail, SourceConfig } from '../api/Models';
 import { RouteParams } from '../pages/RouteParams';
@@ -10,12 +11,14 @@ export async function resumePlaybackParams(context: Context, entry: WatchEntry, 
   if (entry.serverUrl.replace(/\/+$/, '') !== session.serverUrl.replace(/\/+$/, '')) {
     throw new Error('这条记录属于其他服务端，请先切换到对应服务端');
   }
-  const index = entry.episodeIndex;
-  if (!Number.isInteger(index) || index < 0) { throw new Error('观看记录的集数无效'); }
+  const savedIndex = entry.episodeIndex;
+  const savedLabel = entry.episodeLabel ?? '';
+  if (savedLabel.trim() === '' && (!Number.isInteger(savedIndex) || savedIndex < 0)) { throw new Error('观看记录的集数无效'); }
   const cached = EpisodeCache.getRecord(context, entry.serverUrl, entry.sourceUrl, entry.vodId);
   let episodes = cached?.urls ?? null;
   let episodeLabels = cached?.labels ?? [];
-  if (episodes === null || index >= episodes.length) {
+  let index = episodes === null ? -1 : historyEpisodeIndex(savedIndex, savedLabel, episodes, episodeLabels);
+  if (index < 0 || episodes === null) {
     const api = session.api;
     if (api === null) { throw new Error('请先连接服务端再继续播放'); }
     let source: SourceConfig | null = null;
@@ -40,8 +43,9 @@ export async function resumePlaybackParams(context: Context, entry: WatchEntry, 
       throw new Error('服务端已切换，请重新选择观看记录');
     }
     EpisodeCache.put(context, entry.serverUrl, entry.sourceUrl, entry.vodId, episodes, episodeLabels);
+    index = historyEpisodeIndex(savedIndex, savedLabel, episodes, episodeLabels);
   }
-  if (index >= episodes.length || episodes[index] === '') {
+  if (index < 0 || index >= episodes.length || episodes[index] === '') {
     throw new Error('上次观看的集数已不可用，请从搜索结果重新选择');
   }
   return { episodes: JSON.stringify(episodes), episodeLabels: JSON.stringify(episodeLabels), index: index.toString(), title: entry.title,

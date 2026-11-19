@@ -1,3 +1,4 @@
+import { historyEpisodeIndex } from '../common/EpisodeMatch';
 import { RouteParams } from './RouteParams';
 /**
  * 详情页 —— 拉取选集列表（服务端 /api/detail，直连源优先）+ 选集 + 续播入口。
@@ -118,10 +119,10 @@ struct DetailPage {
     const urls = record.urls.slice();
     this.episodes = urls;
     this.episodeLabels = record.labels ?? [];
-    if (this.lastWatch !== null && this.lastWatch.episodeIndex >= 0 &&
-      this.lastWatch.episodeIndex < urls.length) {
-      this.selected = this.lastWatch.episodeIndex;
-      this.focusSegment(this.lastWatch.episodeIndex);
+    const resumeIndex = this.resumeEpisodeIndex();
+    if (resumeIndex >= 0) {
+      this.selected = resumeIndex;
+      this.focusSegment(resumeIndex);
     }
     return true;
   }
@@ -213,10 +214,10 @@ struct DetailPage {
       'desc': stripHtml(d.info.desc), 'remarks': d.info.remarks,
       'year': d.info.year, 'area': d.info.area, 'actor': d.info.actor
     };
-    if (this.lastWatch !== null && this.lastWatch.episodeIndex >= 0 &&
-      this.lastWatch.episodeIndex < d.episodes.length) {
-      this.selected = this.lastWatch.episodeIndex;
-      this.focusSegment(this.lastWatch.episodeIndex);
+    const resumeIndex = this.resumeEpisodeIndex();
+    if (resumeIndex >= 0) {
+      this.selected = resumeIndex;
+      this.focusSegment(resumeIndex);
     }
     if (fresh) {
       DETAIL_CACHE.set(`${this.session.serverUrl}|${this.sourceUrl}|${this.vodId}`, { detail: d, at: Date.now() });
@@ -251,11 +252,17 @@ struct DetailPage {
     return parts.join(' · ');
   }
 
+  private resumeEpisodeIndex(): number {
+    const entry = this.lastWatch;
+    return entry === null ? -1 : historyEpisodeIndex(entry.episodeIndex, entry.episodeLabel ?? '',
+      this.episodes, this.episodeLabels);
+  }
+
   private playAt(index: number): void {
     if (index < 0 || index >= this.episodes.length) {
       return;
     }
-    const resumeMs = (this.lastWatch !== null && this.lastWatch.episodeIndex === index)
+    const resumeMs = (this.lastWatch !== null && this.resumeEpisodeIndex() === index)
       ? this.lastWatch.positionMs : 0;
     router.pushUrl({
       url: 'pages/Player',
@@ -360,11 +367,11 @@ struct DetailPage {
                     .maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis })
                 }
                 Row({ space: 8 }) {
-                  if (this.lastWatch !== null) {
-                    Button(`▶ 继续看第${this.lastWatch.episodeIndex + 1}集`)
+                  if (this.lastWatch !== null && this.resumeEpisodeIndex() >= 0) {
+                    Button(`▶ 继续看${this.lastWatch.episodeLabel || `第${this.resumeEpisodeIndex() + 1}集`}`)
                       .fontSize(13).height(34).borderRadius(17)
                       .backgroundColor(Theme.ACCENT).fontColor(Theme.ON_ACCENT)
-                      .onClick(() => { this.playAt(this.lastWatch !== null ? this.lastWatch.episodeIndex : 0); })
+                      .onClick(() => { this.playAt(this.resumeEpisodeIndex()); })
                   }
                   Button(this.isFav ? '✓ 已收藏' : '＋ 收藏')
                     .fontSize(13).height(34).borderRadius(17)

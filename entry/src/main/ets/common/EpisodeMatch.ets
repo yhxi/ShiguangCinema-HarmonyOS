@@ -27,7 +27,7 @@ export function matchEpisodeIndex(index: number, urls: string[], labels: string[
     const candidateLabel = (otherLabels[i] ?? '').trim().toLowerCase();
     const candidateSeason = episodeSeason(candidateLabel, otherUrls[i]);
     if (currentSeason !== '' && candidateSeason !== '' && currentSeason !== candidateSeason) { continue; }
-    const same = urls[index] === otherUrls[i] || (number >= 0
+    const same = (urls[index] !== '' && urls[index] === otherUrls[i]) || (number >= 0
       ? episodeNumber(candidateLabel, otherUrls[i]) === number : label !== '' && label === candidateLabel);
     if (same) {
       if (match >= 0) { return -1; }
@@ -35,4 +35,10 @@ export function matchEpisodeIndex(index: number, urls: string[], labels: string[
     }
   }
   return match;
+}
+
+/** Older history entries only contain the index. Labelled entries must match uniquely. */
+export function historyEpisodeIndex(index: number, label: string, urls: string[], labels: string[]): number {
+  if (label.trim() !== '') { return matchEpisodeIndex(0, [''], [label], urls, labels); }
+  return Number.isInteger(index) && index >= 0 && index < urls.length ? index : -1;
 }

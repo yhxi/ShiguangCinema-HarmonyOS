@@ -139,13 +139,19 @@ test('recent viewing resumes the exact episode and saved position from cache', a
   const source = fs.readFileSync('entry/src/main/ets/common/ResumePlayback.ets', 'utf8');
   let networkCalls = 0;
   const episodeCache = {getRecord: () => ({urls: ['first', 'second'], labels: ['第1集', '第2集']}), put: () => {}};
-  const { resumePlaybackParams } = load(source, name => name.includes('EpisodeCache') ? { EpisodeCache: episodeCache } : {});
+  const episodeMatch = load(fs.readFileSync('entry/src/main/ets/common/EpisodeMatch.ets', 'utf8'));
+  const { resumePlaybackParams } = load(source, name => name.includes('EpisodeCache') ? { EpisodeCache: episodeCache } : episodeMatch);
   const session = {serverUrl:'https://server', sources: [], api:{detail: async () => {networkCalls++;}}, directCms: {}};
   const entry = {serverUrl:'https://server', sourceUrl:'https://source', vodId:'1', episodeIndex:1, positionMs:42420, title:'剧', cover:'pic'};
   const p = await resumePlaybackParams({}, entry, session);
   assert.equal(p.index, '1'); assert.equal(p.resumeMs, '42420'); assert.equal(p.forceResume, '1');
   assert.deepEqual(JSON.parse(p.episodes), ['first', 'second']);
   assert.deepEqual(JSON.parse(p.episodeLabels), ['第1集', '第2集']); assert.equal(networkCalls, 0);
+  episodeCache.getRecord = () => ({ urls: ['trailer','first','second'], labels: ['预告','EP01','EP02'] });
+  const reordered = await resumePlaybackParams({}, { ...entry, episodeLabel: '第2集' }, session);
+  assert.equal(reordered.index, '2');
+  assert.equal(reordered.resumeMs, '42420');
+  assert.equal(networkCalls, 0);
   session.serverUrl = 'https://other';
   await assert.rejects(resumePlaybackParams({}, entry, session), /其他服务端/);
 });
@@ -153,7 +159,8 @@ test('recent viewing resumes the exact episode and saved position from cache', a
 test('recent viewing fetches missing episodes and reports unavailable saved episode', async () => {
   const source = fs.readFileSync('entry/src/main/ets/common/ResumePlayback.ets', 'utf8');
   const episodeCache = {getRecord: () => null, put: () => {}};
-  const { resumePlaybackParams } = load(source, name => name.includes('EpisodeCache') ? { EpisodeCache: episodeCache } : {});
+  const episodeMatch = load(fs.readFileSync('entry/src/main/ets/common/EpisodeMatch.ets', 'utf8'));
+  const { resumePlaybackParams } = load(source, name => name.includes('EpisodeCache') ? { EpisodeCache: episodeCache } : episodeMatch);
   const entry = {serverUrl:'s', sourceUrl:'src', vodId:'1', episodeIndex:1, positionMs:100, title:'剧', cover:''};
   const session = {serverUrl:'s', sources:[{url:'src'}], directCms:{shouldTryDirect: () => true, detail: async () => {throw Error('unavailable');}},
     api:{detail: async () => ({episodes:['first', 'second']})}};
@@ -161,6 +168,8 @@ test('recent viewing fetches missing episodes and reports unavailable saved epis
   assert.equal(p.index, '1'); assert.equal(p.resumeMs, '100');
   session.api.detail = async () => ({episodes:['first']});
   await assert.rejects(resumePlaybackParams({}, entry, session), /集数已不可用/);
+  session.api.detail = async () => ({episodes:['first', 'special'], episodeLabels:['第1集', '特别篇']});
+  await assert.rejects(resumePlaybackParams({}, { ...entry, episodeLabel: '第2集' }, session), /集数已不可用/);
 });
 
 test('search suggestions load separate movie, television and animation lists', async () => {
@@ -487,4 +496,40 @@ test('media center enables only available episodes and skips ten seconds through
   player.switching = true;
   player.skipFromMediaCenter(1);
   assert.equal(seeks.length, 4);
+});
+
+
+test('a long stall switches source at the last position, while progress and pauses reset the wait', () => {
+  const src = fs.readFileSync('entry/src/main/ets/pages/Player.ets', 'utf8');
+  const extract = (name, end) => src.slice(src.indexOf('  private ' + name),
+    src.indexOf('  private ' + end)).replace('private ', '');
+  const methods = extract('checkPlaybackStall(', 'stopSaveTimer(') +
+    extract('keepRecoveryPosition(', 'rejectRecoverySource(') +
+    src.slice(src.indexOf('  private replacementFailureMessage('), src.indexOf('  /** 自愈全部失败')).replace('private ', '');
+  const { Harness } = load('export class Harness {' + methods + '}');
+  let switches = 0;
+  const player = Object.assign(new Harness(), {
+    playing: true, firstFrameSeen: true, durMs: 1200000, curMs: 600000,
+    stallPositionMs: 600000, stallSince: 1000, errorMsg: '',
+    recoveryPositionMs: 0, switchToNextSource: () => { switches++; }
+  });
+  assert.equal(player.checkPlaybackStall(19000), false);
+  player.curMs += 1000;
+  assert.equal(player.checkPlaybackStall(21000), false);
+  player.playing = false;
+  assert.equal(player.checkPlaybackStall(45000), false);
+  player.playing = true;
+  assert.equal(player.checkPlaybackStall(64000), false);
+  assert.equal(player.checkPlaybackStall(65000), true);
+  assert.equal(switches, 1);
+  assert.equal(player.recoveryPositionMs, 601000);
+  assert.equal(player.checkPlaybackStall(90000), false);
+
+  assert.equal(player.replacementFailureMessage('无同一集'), '无同一集');
+  player.replacementFailure = 'lookup';
+  assert.match(player.replacementFailureMessage('无同一集'), /查询失败/);
+  player.replacementFailure = 'play';
+  assert.match(player.replacementFailureMessage('无同一集'), /无法播放/);
+  player.replacementFailure = 'seek';
+  assert.match(player.replacementFailureMessage('无同一集'), /无法跳到原进度/);
 });
