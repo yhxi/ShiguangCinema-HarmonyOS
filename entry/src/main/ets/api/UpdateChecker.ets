@@ -6,7 +6,7 @@
  */
 
 import { http } from '@kit.NetworkKit';
-import { JsonObj, asArr, asObj, parseObj, s } from './JsonUtil';
+import { JsonObj, asArr, asObj, parseObj, s, n } from './JsonUtil';
 
 /** 发布仓库：与 Android 版一致，指向自己的 Releases */
 export const UPDATE_REPO: string = 'yhxi/ShiguangCinema-HarmonyOS';
@@ -18,6 +18,8 @@ export interface ReleaseInfo {
   notes: string;
   /** 发布里第一个 .hap 的下载地址，没有则为空 */
   downloadUrl: string;
+  downloadSize: number;
+  downloadDigest: string;
   releaseUrl: string;
 }
 
@@ -81,14 +83,20 @@ export async function checkUpdate(): Promise<UpdateResult> {
       return fail('GitHub 返回的版本信息无法读取', code);
     }
     let downloadUrl: string = '';
+    let downloadSize = 0;
+    let downloadDigest = '';
     const assets = asArr(root['assets']);
     if (assets !== null) {
       for (const item of assets) {
         const asset = asObj(item);
         if (asset === null) { continue; }
         if (s(asset['name']).toLowerCase().endsWith('.hap')) {
-          downloadUrl = s(asset['browser_download_url']);
-          if (downloadUrl !== '') { break; }
+          const url = s(asset['browser_download_url']);
+          if (!url.startsWith(RELEASES_PAGE + '/download/')) { continue; }
+          downloadUrl = url;
+          downloadSize = Math.max(0, n(asset['size']));
+          downloadDigest = s(asset['digest']).toLowerCase();
+          break;
         }
       }
     }
@@ -96,6 +104,8 @@ export async function checkUpdate(): Promise<UpdateResult> {
       tag: tag,
       notes: s(root['body']),
       downloadUrl: downloadUrl,
+      downloadSize: downloadSize,
+      downloadDigest: downloadDigest,
       releaseUrl: releaseUrl
     };
     return { ok: true, release: release, httpCode: code };

@@ -267,7 +267,7 @@ test('switching source at 10:00 skips missing episodes and seeks before playing'
   Object.assign(player, {
     title: 'Example', sourceUrl: 'primary', episodeIndex: 2,
     episodes: ['a1','a2','a3'], episodeLabels: ['第1集','第2集','第3集'], curMs: 600000, durMs: 1200000,
-    recoveryPositionMs: 0, playerGeneration: 1, hudTimer: -1,
+    recoveryPositionMs: 0, playerGeneration: 1, hudTimer: -1, restoringSource: null,
     session: { directCms: { shouldTryDirect: () => false }, api: { detail: async (id) => ({
       episodes: id === 'short' ? ['b1','b2','b4'] : ['trailer','b1','b2','b3'],
       episodeLabels: id === 'short' ? ['第1集','第2集','第4集'] : ['预告','EP01','EP02','EP03'],
@@ -409,7 +409,7 @@ test('automatic next episode checkpoints history before startup and saves the ne
   const writes = [];
   const player = Object.assign(new Harness(), {
     episodeIndex: 0, episodes: ['a','b'], curMs: 550000, durMs: 600000, player: {currentTime: 550000},
-    rememberProgress: true, sourceUrl: 'source', playing: true, switching: false,
+    rememberProgress: true, sourceUrl: 'source', playing: true, switching: false, restoringSource: null,
     writeProgress(position, duration) { writes.push([this.episodeIndex, position, duration]); },
     setupPlayer() { this.playing = false; this.switching = true; }
   });
@@ -543,6 +543,8 @@ test('viewing backup merges without duplicates, preserves newer progress and exc
     const prefs = new Prefs();
     const values = {};
     prefs.store = { getAll: async () => ({...values}), getSync: (k, d) => values[k] ?? d,
+      hasSync: k => Object.hasOwn(values, k), deleteSync: k => { delete values[k]; },
+      putSync: (k, value) => { values[k] = value; },
       put: async (k, value) => { values[k] = value; }, flush: async () => {} };
     return prefs;
   };
@@ -562,6 +564,22 @@ test('viewing backup merges without duplicates, preserves newer progress and exc
   ]);
   assert.ok(!text.includes('secret-cookie') && !text.includes('secret-token'));
   await dest.saveWatch({ ...old, positionMs: 99000, updatedAt: 2 });
+  const original = await dest.store.getAll();
+  const putSync = dest.store.putSync;
+  dest.store.putSync = (key, value) => {
+    if (key.startsWith('skip:')) { throw new Error('write failure'); }
+    putSync(key, value);
+  };
+  await assert.rejects(dest.restoreViewingBackup(text, server, []), /已恢复原数据/);
+  assert.deepEqual(await dest.store.getAll(), original);
+  dest.store.putSync = putSync;
+  let failFlush = true;
+  dest.store.flush = async () => {
+    if (failFlush) { failFlush = false; throw new Error('disk failure'); }
+  };
+  await assert.rejects(dest.restoreViewingBackup(text, server, []), /已恢复原数据/);
+  assert.deepEqual(await dest.store.getAll(), original);
+  assert.equal((await dest.getHistory())[0].positionMs, 99000);
   let sources = await dest.restoreViewingBackup(text, server, []);
   sources = await dest.restoreViewingBackup(text, server, sources);
   assert.equal(sources.length, 1);
@@ -584,4 +602,126 @@ test('live source preference only restores a working line of the selected channe
   await LiveLocal.rememberLine(prefs, 'CCTV1', 'backup');
   assert.equal(LiveLocal.preferredIndex(prefs, ['first','backup','other'], ['CCTV1','CCTV1','CCTV2'], 0), 1);
   assert.equal(LiveLocal.preferredIndex(prefs, ['first','backup'], ['CCTV1','CCTV2'], 0), 0);
+});
+
+
+test('source lookup and failed candidates share one deadline and restore the original episode', async () => {
+  const src = fs.readFileSync('entry/src/main/ets/pages/Player.ets', 'utf8');
+  const section = (start, end) => src.slice(src.indexOf('  private ' + start), src.indexOf('  private ' + end));
+  const js = ts.transpileModule('export class Harness {' +
+    section('async switchToNextSource(', 'async findReplacementSource(') +
+    section('finishHealFail(', 'stopStartupTimer(') + '}', {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 }
+  }).outputText;
+  const deadlines = [];
+  const clears = [];
+  const context = { exports: {}, SearchRequests: class { cancel() { this.cancelled = true; } },
+    setTimeout: (callback, ms) => deadlines.push({ callback, ms }),
+    clearTimeout: id => clears.push(id) };
+  vm.runInNewContext(js, context);
+  const player = new context.exports.Harness();
+  const original = ['a1', 'a2'];
+  let releaseNext;
+  let setupCount = 0;
+  Object.assign(player, {
+    sourceUrl: 'primary', vodId: 'primaryId', episodes: original, episodeLabels: ['第1集', '第2集'],
+    episodeIndex: 1, cover: 'primary.jpg', durMs: 1200000, recoveryPositionMs: 600000,
+    usePlainUrl: false, isPaused: true, sourceLookup: null, sourceSwitch: null, playerGeneration: 1,
+    keepRecoveryPosition: () => {}, writeProgress: () => {}, stopStartupTimer: () => {}, stopSaveTimer: () => {},
+    stopBackgroundTask: () => {}, releasePlayer: () => {}, notify: () => {},
+    episodeSource: { setItems: () => {} },
+    setupPlayer: () => { setupCount++; },
+    findReplacementSource: async () => {}
+  });
+  await player.switchToNextSource(true);
+  Object.assign(player, {
+    sourceUrl: 'bad', vodId: 'badId', episodes: ['b1'], episodeLabels: [], episodeIndex: 0,
+    cover: 'bad.jpg', recoveryPositionMs: 0, replacementNeedsProgress: true,
+    findReplacementSource: () => new Promise(resolve => { releaseNext = resolve; })
+  });
+  const lookup = player.switchToNextSource();
+  const request = player.sourceLookup;
+  assert.deepEqual(deadlines.map(d => d.ms), [24000]);
+  deadlines[0].callback();
+  assert.equal(request.cancelled, true);
+  assert.deepEqual(clears, [1]);
+  assert.equal(player.sourceUrl, 'primary');
+  assert.equal(player.vodId, 'primaryId');
+  assert.equal(player.episodes, original);
+  assert.equal(player.episodeIndex, 1);
+  assert.equal(player.recoveryPositionMs, 600000);
+  assert.equal(player.restoringSource.paused, true);
+  assert.equal(setupCount, 1);
+  assert.equal(player.failRestoredSource(), true);
+  assert.equal(player.failRestoredSource(), false);
+  assert.match(player.errorMsg, /已保留进度/);
+  releaseNext();
+  await lookup;
+  assert.equal(player.sourceLookup, null);
+  assert.equal(setupCount, 1);
+});
+
+test('HAP updater reuses verified files and removes old or partial packages after a verified download', async () => {
+  const { createHash } = require('node:crypto');
+  const root = 'fake/update/';
+  const name = tag => root + 'ShiguangCinema-HarmonyOS-' + tag + '-unsigned.hap';
+  const bytes = Buffer.alloc(70000, 1);
+  bytes.set([0x50, 0x4b, 3, 4]);
+  bytes.fill(0, bytes.length - 22);
+  bytes.set([0x50, 0x4b, 5, 6], bytes.length - 22);
+  const digest = 'sha256:' + createHash('sha256').update(bytes).digest('hex');
+  const old = name('v1.5.5.16');
+  const out = name('v1.5.5.17');
+  const stalePart = name('v1.5.5.15') + '.part';
+  const files = new Map([[old, bytes], [stalePart, bytes.subarray(0, 100)], [root + 'unrelated', bytes]]);
+  let downloads = 0;
+  let transfer = bytes.subarray(0, 100);
+  const fileIo = {
+    OpenMode: { READ_ONLY: 0 }, WhenceType: { SEEK_SET: 0 }, access: async () => true,
+    open: async path => ({ fd: { path, offset: 0 } }), close: async () => {},
+    lseek: (fd, offset) => { fd.offset = offset; },
+    stat: async path => ({ size: files.get(path).length }),
+    read: async (fd, buffer) => {
+      const chunk = files.get(fd.path).subarray(fd.offset, fd.offset + buffer.byteLength);
+      new Uint8Array(buffer).set(chunk);
+      fd.offset += chunk.length;
+      return chunk.length;
+    },
+    listFile: async () => [...files.keys()].map(path => path.slice(root.length)),
+    unlink: async path => { files.delete(path); },
+    rename: async (from, to) => { files.set(to, files.get(from)); files.delete(from); }
+  };
+  const request = { downloadFile: async (ctx, options) => {
+    downloads++;
+    files.set(options.filePath, transfer);
+    return { on: (event, cb) => { if (event === 'complete') { queueMicrotask(cb); } } };
+  } };
+  const cryptoFramework = { createMd: () => {
+    const hash = createHash('sha256');
+    return { update: async blob => { hash.update(blob.data); }, digest: async () => ({ data: hash.digest() }) };
+  } };
+  const { downloadUpdateFile, findDownloadedUpdate } = load(
+    fs.readFileSync('entry/src/main/ets/api/UpdateDownloader.ets', 'utf8'),
+    name => name === '@kit.CoreFileKit' ? { fileIo } :
+      name === '@kit.BasicServicesKit' ? { request } : { cryptoFramework });
+  const context = { filesDir: 'fake' };
+  const info = { tag: 'v1.5.5.17', url: 'https://github.com/asset', size: bytes.length, digest };
+  assert.equal(await findDownloadedUpdate(context, { ...info, tag: 'v1.5.5.16', size: 0, digest: '' }), old);
+  assert.equal((await downloadUpdateFile(context, info, () => {})).ok, false);
+  assert.equal(files.has(out + '.part'), false);
+  assert.equal(files.has(old), true);
+  transfer = Buffer.from(bytes);
+  transfer[66000] ^= 1;
+  assert.equal((await downloadUpdateFile(context, info, () => {})).ok, false);
+  transfer = bytes;
+  const first = downloadUpdateFile(context, info, () => {});
+  const second = downloadUpdateFile(context, info, () => {});
+  assert.equal((await first).path, out);
+  assert.equal((await second).path, out);
+  assert.equal(files.has(stalePart), false);
+  assert.equal(files.has(old), false);
+  assert.equal(files.has(root + 'unrelated'), true);
+  assert.equal(await findDownloadedUpdate(context, info), out);
+  assert.equal((await downloadUpdateFile(context, info, () => {})).path, out);
+  assert.equal(downloads, 3);
 });

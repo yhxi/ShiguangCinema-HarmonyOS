@@ -4,16 +4,16 @@
 [yhxi/ShiguangCinema-Android-TV](https://github.com/yhxi/ShiguangCinema-Android-TV)。
 
 连接 LibreTV 服务端后即可搜索、点播、看直播，本地保存观看历史与收藏。
-版本节奏与 Android 版同步：本包为 **1.5.5.16**，在 Android TV v1.5.5 的功能面之上
+版本节奏与 Android 版同步：本包为 **1.5.5.17**，在 Android TV v1.5.5 的功能面之上
 补齐了搜索分组/拼音首字母/选集缓存等差异项，并新增片源批量导入、内存监控与直播默认播 CCTV1。
 
 ## 安装包
 
-仓库根目录的 `ShiguangCinema-HarmonyOS-v1.5.5.16-unsigned.hap` 是**未签名**构建，
+仓库根目录的 `ShiguangCinema-HarmonyOS-v1.5.5.17-unsigned.hap` 是**未签名**构建，
 需要自行签名后才能装到设备上（见下方「签名」）。
 
 - bundleName：`com.lshai.shiguangcinema`
-- versionName：`1.5.5.16` / versionCode：`10171`
+- versionName：`1.5.5.17` / versionCode：`10172`
   （规则：`major*10000 + minor*100 + patch`，第四段按增量递增）
 - deviceTypes：`phone`
 
@@ -111,6 +111,13 @@ sign-hap.cmd
 - 混合榜单的「部分榜单先显示」（v1.5.2）：鸿蒙侧仍是服务端一次返回后整体渲染。
 
 ## 变更记录
+
+### v1.5.5.17
+
+- 应用内更新复用校验通过的 HAP，成功下载后清理旧包和残留文件。没有 HAP 附件时可打开 GitHub 发布页。
+- 点播换源从查询到确认出画共用 24 秒时限。失败后保留原片源、集数和进度，并尝试恢复播放。
+- 导入观看备份先准备全部合并结果，写入失败时回退到导入前的数据。
+
 
 ### v1.5.5.16
 

@@ -7,15 +7,19 @@
 import { common, wantConstant } from '@kit.AbilityKit';
 import { fileUri } from '@kit.CoreFileKit';
 import { promptAction } from '@kit.ArkUI';
-import { downloadUpdateFile } from '../api/UpdateDownloader';
+import { downloadUpdateFile, findDownloadedUpdate, UpdatePackage } from '../api/UpdateDownloader';
+import { releasesPageUrl } from '../api/UpdateChecker';
 import { Theme } from '../common/Theme';
 
 @Component
 export struct UpdateDialog {
-  @Prop newTag: string = '';
+  @Prop @Watch('restoreDownload') newTag: string = '';
   @Prop currentVersion: string = '';
   @Prop notes: string = '';
   @Prop downloadUrl: string = '';
+  @Prop downloadSize: number = 0;
+  @Prop downloadDigest: string = '';
+  @Prop releaseUrl: string = '';
   onClosed: () => void = () => {};
 
   /** 0 待下载 1 下载中 2 已完成 3 失败 */
@@ -24,46 +28,83 @@ export struct UpdateDialog {
   @State localPath: string = '';
   @State failMsg: string = '';
 
-  private startDownload(): void {
-    if (this.phase === 1 || this.downloadUrl === '') { return; }
+  @State checkingCache: boolean = true;
+  private requestId: number = 0;
+
+  aboutToAppear(): void { this.restoreDownload(); }
+  aboutToDisappear(): void { this.requestId++; }
+
+  private packageInfo(): UpdatePackage {
+    return { tag: this.newTag, url: this.downloadUrl, size: this.downloadSize, digest: this.downloadDigest };
+  }
+
+  private async restoreDownload(): Promise<void> {
+    const id = ++this.requestId;
+    this.checkingCache = true;
+    this.phase = 0;
+    this.localPath = '';
+    const ctx = getContext(this) as common.UIAbilityContext;
+    const path = await findDownloadedUpdate(ctx, this.packageInfo());
+    if (id !== this.requestId) { return; }
+    this.checkingCache = false;
+    if (path !== '') {
+      this.localPath = path;
+      this.pct = 100;
+      this.phase = 2;
+    }
+  }
+
+  private async startDownload(): Promise<void> {
+    if (this.checkingCache || this.phase === 1 || this.downloadUrl === '') { return; }
+    const id = ++this.requestId;
     this.phase = 1;
     this.pct = 0;
     const ctx = getContext(this) as common.UIAbilityContext;
-    downloadUpdateFile(ctx, this.downloadUrl,
-      `ShiguangCinema-HarmonyOS-${this.newTag}-unsigned.hap`,
-      (pct: number) => { this.pct = pct; })
-      .then((result) => {
-        if (result.ok) {
-          this.localPath = result.path;
-          this.phase = 2;
-        } else {
-          this.failMsg = result.message !== undefined ? result.message : '下载失败';
-          this.phase = 3;
-        }
-      })
-      .catch((e: Object) => {
-        this.failMsg = (e as Error).message;
-        this.phase = 3;
-      });
+    const result = await downloadUpdateFile(ctx, this.packageInfo(), (pct: number) => {
+      if (id === this.requestId) { this.pct = pct; }
+    });
+    if (id !== this.requestId) { return; }
+    if (result.ok) {
+      this.localPath = result.path;
+      this.pct = 100;
+      this.phase = 2;
+    } else {
+      this.failMsg = result.message ?? '下载失败';
+      this.phase = 3;
+    }
   }
 
-  /** 用系统能力把沙箱里的 HAP 交给别的应用处理（签名 / 安装） */
-  private openFile(): void {
+  private async openFile(): Promise<void> {
     if (this.localPath === '') { return; }
+    const ctx = getContext(this) as common.UIAbilityContext;
+    const id = this.requestId;
+    const path = await findDownloadedUpdate(ctx, this.packageInfo());
+    if (id !== this.requestId) { return; }
+    if (path === '') {
+      this.localPath = '';
+      this.failMsg = '安装包已失效，请重新下载';
+      this.phase = 3;
+      return;
+    }
     try {
-      const ctx = getContext(this) as common.UIAbilityContext;
-      const uri = fileUri.getUriFromPath(this.localPath);
-      ctx.startAbility({
+      await ctx.startAbility({
         action: 'ohos.want.action.viewData',
-        uri: uri,
+        uri: fileUri.getUriFromPath(path),
         type: 'application/octet-stream',
         flags: wantConstant.Flags.FLAG_AUTH_READ_URI_PERMISSION
-      }).catch(() => {
-        promptAction.showToast({ message: '没有能打开这个文件的应用' });
       });
     } catch (e) {
-      promptAction.showToast({ message: '打开失败' });
+      promptAction.showToast({ message: '没有能打开这个文件的应用，请先安装 HAP 签名或安装工具' });
     }
+  }
+
+  private openReleasePage(): void {
+    const ctx = getContext(this) as common.UIAbilityContext;
+    const base = releasesPageUrl();
+    const url = this.releaseUrl.startsWith(base + '/') ? this.releaseUrl : base;
+    ctx.startAbility({ action: 'ohos.want.action.viewData', uri: url }).catch(() => {
+      promptAction.showToast({ message: '无法打开 GitHub 发布页' });
+    });
   }
 
   build() {
@@ -79,7 +120,11 @@ export struct UpdateDialog {
       .constraintSize({ maxHeight: 200 }).width('100%').scrollBar(BarState.Off)
       .padding(12).borderRadius(12).backgroundColor(Theme.BG)
 
-      if (this.phase === 0) {
+      if (this.checkingCache) {
+        Text('正在检查已下载的更新包…').fontSize(13).fontColor(Theme.SECONDARY).width('100%')
+      } else if (this.phase === 0 && this.downloadUrl === '') {
+        Text('此版本暂未上传 HAP 附件。').fontSize(13).fontColor(Theme.SECONDARY).width('100%')
+      } else if (this.phase === 0) {
         Text('将下载到应用目录，完成后可直接交给其他应用签名 / 安装。')
           .fontSize(11).fontColor(Theme.TERTIARY).width('100%').lineHeight(17)
       } else if (this.phase === 1) {
@@ -100,7 +145,11 @@ export struct UpdateDialog {
         Button('稍后').fontSize(15).height(44).borderRadius(12).layoutWeight(1)
           .backgroundColor(Theme.TINT).fontColor(Theme.INK)
           .onClick(() => { this.onClosed(); })
-        if (this.phase === 0 || this.phase === 3) {
+        if (!this.checkingCache && this.phase !== 2 && this.downloadUrl === '') {
+          Button('查看发布页').fontSize(15).height(44).borderRadius(12).layoutWeight(1)
+            .backgroundColor(Theme.ACCENT).fontColor(Theme.ON_ACCENT)
+            .onClick(() => { this.openReleasePage(); })
+        } else if (!this.checkingCache && (this.phase === 0 || this.phase === 3)) {
           Button(this.phase === 3 ? '重试' : '下载').fontSize(15).height(44).borderRadius(12).layoutWeight(1)
             .backgroundColor(Theme.ACCENT).fontColor(Theme.ON_ACCENT)
             .onClick(() => { this.startDownload(); })
@@ -109,7 +158,7 @@ export struct UpdateDialog {
             .backgroundColor(Theme.ACCENT).fontColor(Theme.ON_ACCENT)
             .onClick(() => { this.openFile(); })
         } else {
-          Text('正在下载…').fontSize(14).fontColor(Theme.SECONDARY)
+          Text(this.checkingCache ? '正在检查…' : '正在下载…').fontSize(14).fontColor(Theme.SECONDARY)
             .layoutWeight(1).textAlign(TextAlign.Center)
         }
       }.width('100%')

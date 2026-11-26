@@ -76,6 +76,8 @@ export interface UpdateState {
   tag: string;
   notes: string;
   downloadUrl: string;
+  downloadSize?: number;
+  downloadDigest?: string;
   releaseUrl: string;
   /** 用户已经点开看过提示的 tag，用于决定首页胶囊要不要带小圆点 */
   seenTag: string;
@@ -124,8 +126,10 @@ export class Prefs {
   }
 
   async setSkipMarks(title: string, marks: SkipMarks): Promise<void> {
-    await (this.store as preferences.Preferences).put(`skip:${title.trim().toLowerCase()}`, JSON.stringify(marks));
-    await (this.store as preferences.Preferences).flush();
+    return this.enqueueViewingWrite(async () => {
+      await (this.store as preferences.Preferences).put(`skip:${title.trim().toLowerCase()}`, JSON.stringify(marks));
+      await (this.store as preferences.Preferences).flush();
+    });
   }
 
   async getPlaybackSettings(): Promise<PlaybackSettings> {
@@ -160,6 +164,7 @@ export class Prefs {
     }
     return {
       tag: s(o['tag']), notes: s(o['notes']), downloadUrl: s(o['downloadUrl']),
+      downloadSize: n(o['downloadSize']), downloadDigest: s(o['downloadDigest']),
       releaseUrl: s(o['releaseUrl']), seenTag: s(o['seenTag']), checkedAt: n(o['checkedAt'])
     };
   }
@@ -192,12 +197,16 @@ export class Prefs {
     return map;
   }
 
-  private async putMap(key: string, map: Map<string, string>): Promise<void> {
+  private serializeMap(map: Map<string, string>): string {
     const obj: Record<string, Object> = {};
     map.forEach((v: string, k: string) => {
       obj[k] = v;
     });
-    await (this.store as preferences.Preferences).put(key, JSON.stringify(obj));
+    return JSON.stringify(obj);
+  }
+
+  private async putMap(key: string, map: Map<string, string>): Promise<void> {
+    await (this.store as preferences.Preferences).put(key, this.serializeMap(map));
     await (this.store as preferences.Preferences).flush();
   }
 
@@ -296,7 +305,14 @@ export class Prefs {
   }
 
   async setSources(serverUrl: string, sources: SourceConfig[]): Promise<void> {
-    const map = await this.getMap(KEY_SOURCES);
+    return this.enqueueViewingWrite(async () => {
+      const map = await this.getMap(KEY_SOURCES);
+      map.set(serverUrl, this.serializeSources(sources));
+      await this.putMap(KEY_SOURCES, map);
+    });
+  }
+
+  private serializeSources(sources: SourceConfig[]): string {
     const arr: Object[] = [];
     for (const src of sources) {
       const o: Record<string, Object> = {
@@ -306,16 +322,15 @@ export class Prefs {
       arr.push(o as Object);
     }
     const root: Record<string, Object> = { 'sources': arr as Object };
-    map.set(serverUrl, JSON.stringify(root));
-    await this.putMap(KEY_SOURCES, map);
+    return JSON.stringify(root);
   }
 
   private historyCache: WatchEntry[] | null = null;
-  private historyWrites: Promise<void> = Promise.resolve();
+  private viewingWrites: Promise<void> = Promise.resolve();
 
-  private enqueueHistory(work: () => Promise<void>): Promise<void> {
-    const next = this.historyWrites.catch(() => {}).then(work);
-    this.historyWrites = next.catch(() => {});
+  private enqueueViewingWrite(work: () => Promise<void>): Promise<void> {
+    const next = this.viewingWrites.catch(() => {}).then(work);
+    this.viewingWrites = next.catch(() => {});
     return next;
   }
 
@@ -355,7 +370,7 @@ export class Prefs {
   }
 
   async getHistory(): Promise<WatchEntry[]> {
-    await this.historyWrites;
+    await this.viewingWrites;
     // 播放中每 5 秒就会保存一次进度，历史必须常驻内存，
     // 否则每次保存都要全量解析 + 全量序列化 100 条
     if (this.historyCache === null) {
@@ -371,7 +386,7 @@ export class Prefs {
   }
 
   async saveWatch(entry: WatchEntry): Promise<void> {
-    return this.enqueueHistory(() => this.saveWatchNow(entry));
+    return this.enqueueViewingWrite(() => this.saveWatchNow(entry));
   }
 
   private async saveWatchNow(entry: WatchEntry): Promise<void> {
@@ -393,7 +408,7 @@ export class Prefs {
   }
 
   async updateWatchCover(key: string, previous: string, cover: string): Promise<void> {
-    return this.enqueueHistory(async () => {
+    return this.enqueueViewingWrite(async () => {
       if (this.historyCache === null) { await this.loadHistoryFromDisk(); }
       const list = this.historyCache as WatchEntry[];
       const entry = list.find((item: WatchEntry) => item.key === key);
@@ -404,7 +419,7 @@ export class Prefs {
   }
 
   async clearHistory(): Promise<void> {
-    return this.enqueueHistory(() => this.clearHistoryNow());
+    return this.enqueueViewingWrite(() => this.clearHistoryNow());
   }
 
   private async clearHistoryNow(): Promise<void> {
@@ -414,7 +429,7 @@ export class Prefs {
   }
 
   async removeWatch(key: string): Promise<void> {
-    return this.enqueueHistory(() => this.removeWatchNow(key));
+    return this.enqueueViewingWrite(() => this.removeWatchNow(key));
   }
 
   private async removeWatchNow(key: string): Promise<void> {
@@ -472,25 +487,32 @@ export class Prefs {
   }
 
   async toggleFavorite(entry: WatchEntry): Promise<boolean> {
-    const list = await this.getFavorites();
-    const idx = list.findIndex((e: WatchEntry) => e.key === entry.key);
-    if (idx >= 0) {
-      list.splice(idx, 1);
+    let added = false;
+    await this.enqueueViewingWrite(async () => {
+      const list = await this.getFavorites();
+      const idx = list.findIndex((e: WatchEntry) => e.key === entry.key);
+      if (idx >= 0) {
+        list.splice(idx, 1);
+      } else {
+        list.unshift(entry);
+        added = true;
+      }
       await this.putEntryList(KEY_FAVORITES, list);
-      return false;
-    }
-    list.unshift(entry);
-    await this.putEntryList(KEY_FAVORITES, list);
-    return true;
+    });
+    return added;
   }
 
-  private async putEntryList(key: string, list: WatchEntry[]): Promise<void> {
+  private serializeEntryList(list: WatchEntry[]): string {
     const arr: Object[] = [];
     for (const e of list) {
       arr.push(entryToObj(e) as Object);
     }
     const root: Record<string, Object> = { 'list': arr as Object };
-    await (this.store as preferences.Preferences).put(key, JSON.stringify(root));
+    return JSON.stringify(root);
+  }
+
+  private async putEntryList(key: string, list: WatchEntry[]): Promise<void> {
+    await (this.store as preferences.Preferences).put(key, this.serializeEntryList(list));
     await (this.store as preferences.Preferences).flush();
   }
 
@@ -572,22 +594,59 @@ export class Prefs {
         outroRemainingMs: n(mark['outroRemainingMs']), outroReferenceMs: n(mark['outroReferenceMs']) } });
     }
     const mergedSources = Array.from(sources.values());
-    await this.enqueueHistory(async () => {
+    await this.enqueueViewingWrite(async () => {
       if (this.historyCache === null) { await this.loadHistoryFromDisk(); }
       const mergedHistory = this.mergeBackupEntries(this.historyCache as WatchEntry[], history).slice(0, 100);
-      await this.putEntryList(KEY_HISTORY, mergedHistory);
-      this.historyCache = mergedHistory;
       const mergedFavorites = this.mergeBackupEntries(await this.getFavorites(), favorites);
-      await this.putEntryList(KEY_FAVORITES, mergedFavorites);
-      await this.setSources(server, mergedSources);
-      const store = this.store as preferences.Preferences;
+      const sourceMap = await this.getMap(KEY_SOURCES);
+      sourceMap.set(server, this.serializeSources(mergedSources));
+      const changes = new Map<string, string>();
+      changes.set(KEY_HISTORY, this.serializeEntryList(mergedHistory));
+      changes.set(KEY_FAVORITES, this.serializeEntryList(mergedFavorites));
+      changes.set(KEY_SOURCES, this.serializeMap(sourceMap));
       for (const item of marks) {
         const key = 'skip:' + item.title;
-        if (this.getRaw(key, '') === '') { await store.put(key, JSON.stringify(item.marks)); }
+        if (!changes.has(key) && this.getRaw(key, '') === '') { changes.set(key, JSON.stringify(item.marks)); }
       }
-      await store.flush();
+      await this.writeBackupChanges(changes);
+      this.historyCache = mergedHistory;
     });
     return mergedSources;
+  }
+
+  private async writeBackupChanges(changes: Map<string, string>): Promise<void> {
+    const store = this.store as preferences.Preferences;
+    const previous = new Map<string, string | undefined>();
+    for (const key of changes.keys()) {
+      previous.set(key, store.hasSync(key) ? this.getRaw(key, '') : undefined);
+    }
+    const attempted: string[] = [];
+    try {
+      for (const key of changes.keys()) {
+        attempted.push(key);
+        store.putSync(key, changes.get(key) as string);
+      }
+      await store.flush();
+    } catch (e) {
+      let rollbackFailed = false;
+      for (const key of attempted) {
+        const value = previous.get(key);
+        try {
+          if (value === undefined) {
+            if (store.hasSync(key)) { store.deleteSync(key); }
+          }
+          else { store.putSync(key, value); }
+        } catch (rollbackError) {
+          rollbackFailed = true;
+        }
+      }
+      try { await store.flush(); } catch (rollbackError) { rollbackFailed = true; }
+      if (rollbackFailed) {
+        this.historyCache = null;
+        throw new Error('恢复备份失败，原数据未能完整恢复');
+      }
+      throw new Error('恢复备份失败，已恢复原数据');
+    }
   }
 
   private parseBackupEntries(value: Object | undefined, server: string): WatchEntry[] {

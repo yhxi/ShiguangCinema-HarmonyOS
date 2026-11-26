@@ -32,6 +32,9 @@ struct SettingsPage {
   @State newTag: string = '';
   @State newNotes: string = '';
   @State newDownloadUrl: string = '';
+  @State newDownloadSize: number = 0;
+  @State newDownloadDigest: string = '';
+  @State newReleaseUrl: string = '';
 
   private session: Session = Session.getInstance();
   private settingsWindow: window.Window | null = null;
@@ -175,6 +178,7 @@ struct SettingsPage {
         tag: newer ? rel.tag : '',
         notes: newer ? rel.notes : '',
         downloadUrl: newer ? rel.downloadUrl : '',
+        downloadSize: newer ? rel.downloadSize : 0, downloadDigest: newer ? rel.downloadDigest : '',
         releaseUrl: newer ? rel.releaseUrl : '',
         seenTag: prev.seenTag,
         checkedAt: Date.now()
@@ -189,6 +193,9 @@ struct SettingsPage {
     this.newTag = rel.tag;
     this.newNotes = rel.notes;
     this.newDownloadUrl = rel.downloadUrl;
+    this.newDownloadSize = rel.downloadSize;
+    this.newDownloadDigest = rel.downloadDigest;
+    this.newReleaseUrl = rel.releaseUrl;
     this.showUpdateDialog = true;
   }
 
@@ -294,6 +301,8 @@ struct SettingsPage {
         currentVersion: this.versionLabel,
         notes: this.newNotes,
         downloadUrl: this.newDownloadUrl,
+        downloadSize: this.newDownloadSize, downloadDigest: this.newDownloadDigest,
+        releaseUrl: this.newReleaseUrl,
         onClosed: () => { this.showUpdateDialog = false; }
       })
     }

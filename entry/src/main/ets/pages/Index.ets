@@ -81,6 +81,8 @@ struct Index {
   @State updateNotes: string = '';
   @State updateReleaseUrl: string = '';
   @State updateDownloadUrl: string = '';
+  @State updateDownloadSize: number = 0;
+  @State updateDownloadDigest: string = '';
   @State updateSeen: boolean = true;
   @State showUpdateDialog: boolean = false;
 
@@ -476,6 +478,8 @@ struct Index {
       this.updateNotes = state.notes;
       this.updateReleaseUrl = state.releaseUrl;
       this.updateDownloadUrl = state.downloadUrl;
+      this.updateDownloadSize = state.downloadSize ?? 0;
+      this.updateDownloadDigest = state.downloadDigest ?? '';
       this.updateSeen = state.seenTag === state.tag;
     } else {
       this.updateTag = '';
@@ -499,6 +503,7 @@ struct Index {
         tag: newer ? rel.tag : '',
         notes: newer ? rel.notes : '',
         downloadUrl: newer ? rel.downloadUrl : '',
+        downloadSize: newer ? rel.downloadSize : 0, downloadDigest: newer ? rel.downloadDigest : '',
         releaseUrl: newer ? rel.releaseUrl : '',
         seenTag: prev.seenTag,
         checkedAt: Date.now()
@@ -513,6 +518,7 @@ struct Index {
       // 失败也算作"已检查"，避免每次进首页都重试；已知的新版本提示不抹掉
       state = {
         tag: prev.tag, notes: prev.notes, downloadUrl: prev.downloadUrl,
+        downloadSize: prev.downloadSize ?? 0, downloadDigest: prev.downloadDigest ?? '',
         releaseUrl: prev.releaseUrl, seenTag: prev.seenTag, checkedAt: Date.now()
       };
       await this.prefs.setUpdateState(state);
@@ -531,6 +537,7 @@ struct Index {
       this.prefs.getUpdateState().then((prev: UpdateState) => {
         const state: UpdateState = {
           tag: prev.tag, notes: prev.notes, downloadUrl: prev.downloadUrl,
+          downloadSize: prev.downloadSize ?? 0, downloadDigest: prev.downloadDigest ?? '',
           releaseUrl: prev.releaseUrl, seenTag: this.updateTag, checkedAt: prev.checkedAt
         };
         if (this.prefs !== null) { this.prefs.setUpdateState(state).catch(() => {}); }
@@ -649,6 +656,8 @@ struct Index {
       currentVersion: this.currentVersion,
       notes: this.updateNotes,
       downloadUrl: this.updateDownloadUrl,
+      downloadSize: this.updateDownloadSize, downloadDigest: this.updateDownloadDigest,
+      releaseUrl: this.updateReleaseUrl,
       onClosed: () => { this.showUpdateDialog = false; }
     })
   }
